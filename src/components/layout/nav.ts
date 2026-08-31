@@ -3,6 +3,7 @@ import type { ComponentType } from 'react'
 import {
   CalendarIcon,
   DashboardIcon,
+  SparklesIcon,
   TargetIcon,
   TasksIcon,
   type IconProps,
@@ -20,4 +21,5 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/attendance', label: 'Attendance', icon: CalendarIcon },
   { to: '/tasks', label: 'Tasks', icon: TasksIcon },
   { to: '/goals', label: 'Goals', icon: TargetIcon },
+  { to: '/planner', label: 'Planner', icon: SparklesIcon },
 ]
