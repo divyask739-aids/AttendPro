@@ -1,154 +1,150 @@
+import { useState } from 'react'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useForm, type Resolver } from 'react-hook-form'
+import { useForm } from 'react-hook-form'
 import { z } from 'zod'
 
-import { Card } from '@/components/ui/Card'
-import { CATEGORY_LABEL } from '@/features/planner/plannerMeta'
-import { daysUntilFrom, isoToday } from '@/features/planner/plannerMeta'
 import { usePlannerMutations } from '@/hooks/usePlanner'
-import type { GoalCategory } from '@/features/planner/types'
+import { CATEGORY_LABEL } from '@/features/planner/plannerMeta'
+import { addDaysISO, isoToday } from '@/lib/date'
+import type { GoalCategory, NewGoalInput } from '@/features/planner/types'
 import type { TaskPriority } from '@/types'
 
-const CATEGORIES = Object.keys(CATEGORY_LABEL) as GoalCategory[]
-const PRIORITIES: TaskPriority[] = ['low', 'medium', 'high']
-
-const goalSchema = z.object({
-  name: z.string().min(3, 'Use at least 3 characters').max(80, 'Keep it under 80 characters'),
+const schema = z.object({
+  name: z.string().min(3, 'Give your goal a name').max(80),
   category: z.enum(['exam', 'assignment', 'project', 'skill', 'revision', 'other']),
-  deadline: z
-    .string()
-    .min(1, 'Pick a deadline')
-    .refine(
-      (value) => daysUntilFrom(isoToday(), value) >= 0,
-      'Deadline must be today or later',
-    ),
+  deadline: z.string().min(1, 'Pick a deadline'),
   priority: z.enum(['low', 'medium', 'high']),
-  dailyMinutes: z.coerce
-    .number()
-    .int('Whole minutes only')
-    .min(15, 'At least 15 min/day')
-    .max(480, 'Max 480 min/day'),
+  dailyMinutes: z.coerce.number().min(15).max(720),
 })
 
-type GoalFormValues = z.infer<typeof goalSchema>
+type FormValues = z.infer<typeof schema>
 
 const inputClass =
   'w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none transition-colors focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100'
-
 const labelClass = 'mb-1 block text-xs font-medium text-slate-600'
 
-const errorClass = 'mt-1 text-xs text-rose-600'
-
-export function CreateGoalForm() {
-  const { createGoal } = usePlannerMutations()
+export function CreateGoalForm({ email }: { email: string }) {
+  const { createGoal } = usePlannerMutations(email)
+  const [created, setCreated] = useState(false)
 
   const {
     register,
-    reset,
     handleSubmit,
+    reset,
     formState: { errors },
-  } = useForm<GoalFormValues>({
-    resolver: zodResolver(goalSchema) as unknown as Resolver<GoalFormValues>,
+  } = useForm<FormValues>({
+    resolver: zodResolver(schema) as unknown as import('react-hook-form').Resolver<FormValues>,
     defaultValues: {
       name: '',
       category: 'exam',
-      deadline: '',
+      deadline: addDaysISO(isoToday(), 14),
       priority: 'medium',
       dailyMinutes: 60,
     },
   })
 
   const onSubmit = handleSubmit(async (values) => {
-    await createGoal.mutateAsync(values)
+    const input: NewGoalInput = {
+      name: values.name.trim(),
+      category: values.category as GoalCategory,
+      deadline: values.deadline,
+      priority: values.priority as TaskPriority,
+      dailyMinutes: values.dailyMinutes,
+    }
+    await createGoal.mutateAsync(input)
     reset()
+    setCreated(true)
+    window.setTimeout(() => setCreated(false), 3000)
   })
 
   return (
-    <Card title="New goal" description="It gets broken into daily tasks automatically">
-      <form onSubmit={onSubmit} className="space-y-3" noValidate>
-        <div>
+    <form
+      onSubmit={onSubmit}
+      className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+    >
+      <h2 className="text-sm font-semibold text-slate-900">Create a goal</h2>
+      <p className="mt-0.5 text-xs text-slate-500">
+        The planner breaks it into daily milestones based on your deadline and study time.
+      </p>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <div className="sm:col-span-2">
           <label htmlFor="goal-name" className={labelClass}>
             Goal name
           </label>
           <input
             id="goal-name"
-            type="text"
-            placeholder="e.g. Prepare for OS midterm"
+            placeholder="Organic Chemistry exam"
             className={inputClass}
             {...register('name')}
           />
-          {errors.name && <p className={errorClass}>{errors.name.message}</p>}
+          {errors.name && <p className="mt-1 text-xs text-rose-600">{errors.name.message}</p>}
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label htmlFor="goal-category" className={labelClass}>
-              Category
-            </label>
-            <select id="goal-category" className={inputClass} {...register('category')}>
-              {CATEGORIES.map((category) => (
-                <option key={category} value={category}>
-                  {CATEGORY_LABEL[category]}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label htmlFor="goal-priority" className={labelClass}>
-              Priority
-            </label>
-            <select id="goal-priority" className={inputClass} {...register('priority')}>
-              {PRIORITIES.map((priority) => (
-                <option key={priority} value={priority}>
-                  {priority[0].toUpperCase() + priority.slice(1)}
-                </option>
-              ))}
-            </select>
-          </div>
+        <div>
+          <label htmlFor="goal-category" className={labelClass}>
+            Category
+          </label>
+          <select id="goal-category" className={inputClass} {...register('category')}>
+            {Object.entries(CATEGORY_LABEL).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label htmlFor="goal-deadline" className={labelClass}>
-              Deadline
-            </label>
-            <input
-              id="goal-deadline"
-              type="date"
-              min={isoToday()}
-              className={inputClass}
-              {...register('deadline')}
-            />
-            {errors.deadline && <p className={errorClass}>{errors.deadline.message}</p>}
-          </div>
-          <div>
-            <label htmlFor="goal-minutes" className={labelClass}>
-              Study time / day
-            </label>
-            <input
-              id="goal-minutes"
-              type="number"
-              min={15}
-              max={480}
-              step={15}
-              placeholder="60"
-              className={inputClass}
-              {...register('dailyMinutes')}
-            />
-            {errors.dailyMinutes && (
-              <p className={errorClass}>{errors.dailyMinutes.message}</p>
-            )}
-          </div>
+        <div>
+          <label htmlFor="goal-priority" className={labelClass}>
+            Priority
+          </label>
+          <select id="goal-priority" className={inputClass} {...register('priority')}>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </select>
         </div>
 
-        <button
-          type="submit"
-          disabled={createGoal.isPending}
-          className="w-full rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {createGoal.isPending ? 'Creating plan...' : 'Create goal & plan'}
-        </button>
-      </form>
-    </Card>
+        <div>
+          <label htmlFor="goal-deadline" className={labelClass}>
+            Deadline
+          </label>
+          <input
+            id="goal-deadline"
+            type="date"
+            className={inputClass}
+            {...register('deadline')}
+          />
+        </div>
+
+        <div>
+          <label htmlFor="goal-minutes" className={labelClass}>
+            Daily study minutes
+          </label>
+          <input
+            id="goal-minutes"
+            type="number"
+            min={15}
+            step={15}
+            className={inputClass}
+            {...register('dailyMinutes')}
+          />
+        </div>
+      </div>
+
+      <button
+        type="submit"
+        disabled={createGoal.isPending}
+        className="mt-4 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-indigo-500 disabled:opacity-60"
+      >
+        {createGoal.isPending ? 'Building plan...' : 'Create goal'}
+      </button>
+
+      {created && (
+        <p className="mt-2 text-xs font-medium text-emerald-600">
+          Goal created — milestones added to your plan.
+        </p>
+      )}
+    </form>
   )
 }

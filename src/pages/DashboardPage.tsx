@@ -1,79 +1,190 @@
-import { CalendarIcon, ClockIcon, TargetIcon } from '@/components/icons'
-import { GoalProgressCard } from '@/features/dashboard/components/GoalProgressCard'
-import { StatCard } from '@/features/dashboard/components/StatCard'
-import { SubjectAttendanceCard } from '@/features/dashboard/components/SubjectAttendanceCard'
-import { UpcomingTasksCard } from '@/features/dashboard/components/UpcomingTasksCard'
+import { Link } from 'react-router-dom'
+
+import { RecommendationsCard } from '@/components/RecommendationsCard'
+import { Badge } from '@/components/ui/Badge'
+import { Card, EmptyState } from '@/components/ui/Card'
+import { ProgressBar } from '@/components/ui/ProgressBar'
+import { SubjectManager } from '@/features/attendance/components/SubjectManager'
 import { useAttendance } from '@/hooks/useAttendance'
-import { useGoals } from '@/hooks/useGoals'
-import { useTasks } from '@/hooks/useTasks'
-import { daysUntil } from '@/lib/utils'
+import { useProductivityGoals, useTasks } from '@/hooks/useTasks'
+import { useRecommendations } from '@/hooks/useRecommendations'
+import { useStudentProfile } from '@/hooks/useStudentData'
+import { useTodayPlan } from '@/hooks/useTodayPlan'
+import { RISK_LABEL, RISK_TONE, riskTone } from '@/lib/attendance'
+import { dueDateLabel } from '@/lib/utils'
 
-export function DashboardPage() {
-  const { stats, isLoading: attendanceLoading, isError: attendanceError } = useAttendance()
-  const { tasks, isLoading: tasksLoading, isError: tasksError } = useTasks()
-  const { goals, isLoading: goalsLoading, isError: goalsError } = useGoals()
+export function DashboardPage({ email }: { email: string }) {
+  const { profile } = useStudentProfile(email)
+  const { summary, isLoading } = useAttendance(email)
+  const { tasks } = useTasks(email)
+  const { goals } = useProductivityGoals(email)
+  const { recommendations } = useRecommendations(email)
+  const plan = useTodayPlan(email, profile?.dailyStudyMinutes ?? 180)
 
-  const isLoading = attendanceLoading || tasksLoading || goalsLoading
-  const isError = attendanceError || tasksError || goalsError
-
-  if (isError) {
-    return (
-      <p className="rounded-2xl bg-rose-50 p-4 text-sm text-rose-600">
-        Something went wrong while loading your data. Please refresh the page.
-      </p>
-    )
-  }
-
-  if (isLoading || !stats) {
-    return <p className="text-sm text-slate-500">Loading your dashboard...</p>
-  }
-
-  const openTasks = (tasks ?? []).filter((task) => task.status !== 'done')
-  const dueTodayCount = openTasks.filter((task) => daysUntil(task.dueDate) <= 0).length
-  const goalList = goals ?? []
-  const goalsDone = goalList.filter((goal) => goal.completed >= goal.target).length
+  const openTasks = tasks.filter((t) => t.status !== 'done')
+  const upcoming = [...openTasks]
+    .sort((a, b) => a.dueDate.localeCompare(b.dueDate))
+    .slice(0, 5)
 
   return (
     <div>
       <header>
         <h1 className="text-xl font-bold tracking-tight text-slate-900 lg:text-2xl">
-          Welcome back
+          {profile?.fullName ? `Hi, ${profile.fullName.split(' ')[0]}` : 'Dashboard'}
         </h1>
         <p className="mt-1 text-sm text-slate-500">
-          Here is how things are going today.
+          {profile?.course ? `${profile.course} · ` : ''}Your attendance, tasks and plan at a glance
         </p>
       </header>
 
-      <div className="mt-6 grid gap-4 sm:grid-cols-3">
-        <StatCard
-          label="Attendance"
-          value={`${stats.overallPercent}%`}
-          hint={`${stats.totalAttended} of ${stats.totalHeld} classes attended`}
-          icon={<CalendarIcon className="h-4 w-4" />}
-          accentClassName="bg-indigo-50 text-indigo-500"
-        />
-        <StatCard
-          label="Due today"
-          value={String(dueTodayCount)}
-          hint="open tasks due by today"
-          icon={<ClockIcon className="h-4 w-4" />}
-          accentClassName="bg-amber-50 text-amber-500"
-        />
-        <StatCard
-          label="Goals done"
-          value={`${goalsDone}/${goalList.length}`}
-          hint="daily goals completed"
-          icon={<TargetIcon className="h-4 w-4" />}
-          accentClassName="bg-emerald-50 text-emerald-500"
-        />
-      </div>
+      {isLoading ? (
+        <p className="mt-6 text-sm text-slate-500">Loading your data...</p>
+      ) : (
+        <>
+          <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Stat
+              label="Overall attendance"
+              value={summary ? `${summary.overallPercent}%` : '—'}
+              hint={summary ? RISK_LABEL[summary.overallRisk] : 'No subjects yet'}
+              tone={summary ? riskTone(summary.overallPercent) : 'indigo'}
+            />
+            <Stat
+              label="Open tasks"
+              value={String(openTasks.length)}
+              hint={`${plan.dueTodayCount} due today`}
+            />
+            <Stat
+              label="Planned today"
+              value={`${plan.plannedMinutes}m`}
+              hint={`of ${plan.budgetMinutes}m budget`}
+            />
+            <Stat
+              label="Productivity goals"
+              value={String(goals.length)}
+              hint={`${goals.filter((g) => g.completed >= g.target).length} achieved`}
+            />
+          </div>
 
-      <div className="mt-6 grid gap-4 lg:grid-cols-2">
-        <UpcomingTasksCard tasks={tasks ?? []} />
-        <GoalProgressCard goals={goalList} />
-      </div>
+          <div className="mt-4 space-y-4">
+            <Card
+              title="Subject attendance"
+              description="Same numbers everywhere in the app"
+              action={
+                <Link
+                  to="/attendance"
+                  className="text-xs font-semibold text-indigo-600 hover:underline"
+                >
+                  Manage
+                </Link>
+              }
+            >
+              {!summary || summary.subjects.length === 0 ? (
+                <EmptyState
+                  title="No subjects yet."
+                  description="Add subjects to start tracking attendance and unlock smart recommendations."
+                />
+              ) : (
+                <ul className="space-y-3">
+                  {summary.subjects.map((subject) => (
+                    <li key={subject.id}>
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="truncate text-sm font-medium text-slate-800">
+                          {subject.name}
+                        </p>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <span className="text-sm font-bold text-slate-700">
+                            {subject.percent}%
+                          </span>
+                          <Badge tone={RISK_TONE[subject.risk]}>{RISK_LABEL[subject.risk]}</Badge>
+                        </div>
+                      </div>
+                      <ProgressBar
+                        value={subject.percent}
+                        tone={riskTone(subject.percent)}
+                        className="mt-1.5"
+                        label={`${subject.name} attendance`}
+                      />
+                      <p className="mt-1 text-xs text-slate-500">
+                        {subject.attended}/{subject.held} classes
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Card>
 
-      <SubjectAttendanceCard subjects={stats.subjects} className="mt-4" />
+            <Card
+              title="Upcoming tasks"
+              description="Soonest deadlines first"
+              action={
+                <Link to="/tasks" className="text-xs font-semibold text-indigo-600 hover:underline">
+                  All tasks
+                </Link>
+              }
+            >
+              {upcoming.length === 0 ? (
+                <EmptyState
+                  title="No open tasks."
+                  description="Add a task to see it here and in your daily plan."
+                />
+              ) : (
+                <ul className="divide-y divide-slate-100">
+                  {upcoming.map((task) => (
+                    <li
+                      key={task.id}
+                      className="flex items-center justify-between gap-3 py-2.5 first:pt-0"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm text-slate-700">{task.title}</p>
+                        <p className="text-xs text-slate-500">
+                          {task.subjectId
+                            ? (summary?.bySubjectId.get(task.subjectId)?.name ?? 'Subject')
+                            : 'No subject'}
+                        </p>
+                      </div>
+                      <span className="shrink-0 text-xs font-medium text-slate-500">
+                        {dueDateLabel(task.dueDate)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Card>
+
+            <RecommendationsCard recommendations={recommendations} />
+
+            {summary && summary.subjects.length === 0 && (
+              <SubjectManager email={email} />
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function Stat({
+  label,
+  value,
+  hint,
+  tone = 'indigo',
+}: {
+  label: string
+  value: string
+  hint: string
+  tone?: 'indigo' | 'emerald' | 'amber' | 'rose'
+}) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <p className="text-xs font-medium text-slate-500">{label}</p>
+      <p className="mt-1 text-2xl font-bold text-slate-900">{value}</p>
+      <ProgressBar
+        value={tone === 'indigo' ? 100 : Number.parseInt(value, 10) || 0}
+        tone={tone}
+        className="mt-2"
+        label={label}
+      />
+      <p className="mt-1.5 text-xs text-slate-500">{hint}</p>
     </div>
   )
 }

@@ -1,89 +1,89 @@
-import { useMemo } from 'react'
-
-import { ClockIcon } from '@/components/icons'
+import { RecommendationsCard } from '@/components/RecommendationsCard'
 import { Badge } from '@/components/ui/Badge'
-import { Card } from '@/components/ui/Card'
+import { ProgressBar } from '@/components/ui/ProgressBar'
+import { ClockIcon } from '@/components/icons'
 import { PRIORITY_LABEL, PRIORITY_TONE } from '@/features/tasks/taskMeta'
-import { buildTodayPlan } from '@/features/planner/plannerEngine'
-import { isoToday } from '@/features/planner/plannerMeta'
-import { usePlannerGoals, usePlannerMutations } from '@/hooks/usePlanner'
-import { cn, formatShortDate } from '@/lib/utils'
+import { RISK_LABEL, RISK_TONE } from '@/lib/attendance'
+import type { TodayPlan } from '@/features/planner/types'
 
-export function TodayPlanCard() {
-  const { goals, isLoading } = usePlannerGoals()
-  const { toggleMilestone } = usePlannerMutations()
+interface TodayPlanCardProps {
+  plan: TodayPlan
+  onToggleTask?: (taskId: string, done: boolean) => void
+}
 
-  const plan = useMemo(() => buildTodayPlan(goals ?? []), [goals])
-
+export function TodayPlanCard({ plan, onToggleTask }: TodayPlanCardProps) {
   return (
-    <Card
-      title="Today's plan"
-      description={
-        goals && goals.length > 0
-          ? `${plan.plannedMinutes} of ${plan.budgetMinutes} min booked`
-          : undefined
-      }
-    >
-      {isLoading ? (
-        <p className="text-sm text-slate-500">Building your plan...</p>
-      ) : plan.items.length === 0 ? (
-        <div className="py-6 text-center">
-          <p className="text-sm font-medium text-slate-600">Nothing scheduled</p>
-          <p className="mt-1 text-xs text-slate-500">
-            Create a goal or complete your tasks to free up the day.
+    <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div className="flex items-center justify-between gap-2 px-5 pt-5">
+        <div>
+          <h2 className="text-sm font-semibold text-slate-900">Today's Plan</h2>
+          <p className="mt-0.5 text-xs text-slate-500">
+            {plan.entries.length} item{plan.entries.length === 1 ? '' : 's'} · {plan.plannedMinutes}
+            m of {plan.budgetMinutes}m
           </p>
         </div>
-      ) : (
-        <ul className="-my-1 divide-y divide-slate-100">
-          {plan.items.map((item) => {
-            const overdue = item.dueDate < isoToday()
-            return (
-              <li key={item.milestoneId} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
-                <button
-                  type="button"
-                  aria-label={`Mark "${item.title}" as done`}
-                  onClick={() =>
-                    toggleMilestone.mutate({
-                      goalId: item.goalId,
-                      milestoneId: item.milestoneId,
-                      done: true,
-                    })
-                  }
-                  disabled={toggleMilestone.isPending}
-                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 border-slate-300 text-transparent transition-colors hover:border-emerald-500 hover:text-emerald-500 disabled:opacity-50"
+        {plan.rescheduledCount > 0 && (
+          <Badge tone="warning">{plan.rescheduledCount} rescheduled</Badge>
+        )}
+      </div>
+
+      <div className="px-5 pt-4">
+        <ProgressBar
+          value={plan.plannedMinutes}
+          max={plan.budgetMinutes}
+          tone={plan.plannedMinutes >= plan.budgetMinutes ? 'amber' : 'indigo'}
+          label="Daily study time used"
+        />
+      </div>
+
+      <div className="p-5 pt-4">
+        {plan.entries.length === 0 ? (
+          <p className="text-sm text-slate-500">
+            Nothing scheduled today. Add a task or create a goal to build your plan.
+          </p>
+        ) : (
+          <ol className="space-y-2.5">
+            {plan.entries.map((entry) => {
+              const taskId = entry.source === 'task' ? entry.id.replace('task:', '') : null
+              const done = false
+              return (
+                <li
+                  key={entry.id}
+                  className="flex items-center gap-3 rounded-xl bg-slate-50 px-3 py-2.5"
                 >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3} className="h-3 w-3">
-                    <polyline points="20 6 9 17 4 12" />
-                  </svg>
-                </button>
-
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-slate-800">{item.title}</p>
-                  <p className="mt-0.5 truncate text-xs text-slate-500">{item.goalName}</p>
-                </div>
-
-                <div className="flex shrink-0 items-center gap-2">
-                  <Badge tone={PRIORITY_TONE[item.priority]}>{PRIORITY_LABEL[item.priority]}</Badge>
-                  <Badge tone="neutral">{item.estimatedMinutes}m</Badge>
-                  {overdue && (
-                    <span className="inline-flex items-center gap-1 text-xs font-semibold text-rose-600">
-                      <ClockIcon className="h-3.5 w-3.5" />
-                      {formatShortDate(item.dueDate)}
-                    </span>
+                  {onToggleTask && taskId && (
+                    <input
+                      type="checkbox"
+                      checked={done}
+                      onChange={(event) => onToggleTask(taskId, event.target.checked)}
+                      aria-label={`Mark ${entry.title} done`}
+                      className="h-4 w-4 rounded border-slate-300"
+                    />
                   )}
-                </div>
-              </li>
-            )
-          })}
-        </ul>
-      )}
-
-      {!isLoading && plan.items.length > 0 && (
-        <p className={cn('mt-4 border-t border-slate-100 pt-3 text-xs text-slate-500')}>
-          Completing a task updates goal progress instantly. Missed tasks are
-          auto-rescheduled to fit your daily time.
-        </p>
-      )}
-    </Card>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-slate-800">{entry.title}</p>
+                    <p className="truncate text-xs text-slate-500">
+                      {entry.context} · {entry.source === 'task' ? 'Task' : 'Goal milestone'}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <span className="inline-flex items-center gap-1 text-xs text-slate-500">
+                      <ClockIcon className="h-3.5 w-3.5" />
+                      {entry.estimatedMinutes}m
+                    </span>
+                    {entry.risk && entry.risk !== 'safe' && (
+                      <Badge tone={RISK_TONE[entry.risk]}>{RISK_LABEL[entry.risk]}</Badge>
+                    )}
+                    <Badge tone={PRIORITY_TONE[entry.priority]}>{PRIORITY_LABEL[entry.priority]}</Badge>
+                  </div>
+                </li>
+              )
+            })}
+          </ol>
+        )}
+      </div>
+    </section>
   )
 }
+
+export { RecommendationsCard }

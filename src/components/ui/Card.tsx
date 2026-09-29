@@ -28,3 +28,25 @@ export function Card({ title, description, action, className, children }: CardPr
     </section>
   )
 }
+
+interface EmptyStateProps {
+  title: string
+  description: string
+  className?: string
+  action?: ReactNode
+}
+
+export function EmptyState({ title, description, className, action }: EmptyStateProps) {
+  return (
+    <div
+      className={cn(
+        'rounded-2xl border border-dashed border-slate-300 bg-white p-8 text-center',
+        className,
+      )}
+    >
+      <p className="text-sm font-medium text-slate-600">{title}</p>
+      <p className="mx-auto mt-1 max-w-sm text-xs text-slate-500">{description}</p>
+      {action && <div className="mt-4 flex justify-center">{action}</div>}
+    </div>
+  )
+}

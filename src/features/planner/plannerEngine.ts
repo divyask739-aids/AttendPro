@@ -1,38 +1,50 @@
-import type { GoalStatus, Milestone, NewGoalInput, PlanItem, PlannerGoal, Suggestion } from './types'
-import {
-  addDaysISO,
-  daysUntilFrom,
-  estimateTotalMinutes,
-  isoToday,
-  makeId,
-  urgencyScore,
-} from './plannerMeta'
-
 /**
- * Rule-based planning engine.
+ * Rule-based planning engine — the adaptive core of AttendPro.
  *
- * Every exported function is pure and deterministic so a real AI service can
- * later replace or augment these implementations behind the same signatures.
+ * Every function is pure and deterministic, so an AI service can later
+ * replace or augment them behind the same signatures.
+ *
+ *   tasks + goals + deadlines + priority + study time + attendance risk
+ *        -> milestones, today's plan, rescheduling, status, suggestions
  */
+
+import { PRIORITY_WEIGHT } from '@/features/tasks/taskMeta'
+import { RISK_THRESHOLDS } from '@/lib/attendance'
+import { addDaysISO, daysUntilFrom, isoToday, makeId } from '@/lib/date'
+import type { SubjectStats } from '@/hooks/useAttendance'
+import type { Recommendation, Task, TaskPriority } from '@/types'
+
+import { estimateTotalMinutes } from './plannerMeta'
+import type {
+  GoalStatus,
+  Milestone,
+  NewGoalInput,
+  PlannerGoal,
+  Suggestion,
+  TodayPlan,
+  TodayPlanEntry,
+} from './types'
 
 const CHUNK_MINUTES = 45
 
-/** Breaks a goal into evenly sized milestones scheduled across available days. */
+/* ------------------------------------------------------------------ *
+ * 1. Goal -> milestones                                                *
+ * ------------------------------------------------------------------ */
+
 export function generateMilestones(
   goalId: string,
   input: NewGoalInput,
-  todayIso = isoToday(),
+  today = isoToday(),
 ): Milestone[] {
   const total = estimateTotalMinutes(input.category, input.priority)
-  const daysAvailable = Math.max(1, daysUntilFrom(todayIso, input.deadline))
-  const maxMilestones = Math.min(12, daysAvailable * 3)
-  const count = Math.min(maxMilestones, Math.max(2, Math.ceil(total / CHUNK_MINUTES)))
+  const daysAvailable = Math.max(1, daysUntilFrom(today, input.deadline))
+  const maxCount = Math.min(12, daysAvailable * 3)
+  const count = Math.min(maxCount, Math.max(2, Math.ceil(total / CHUNK_MINUTES)))
   const baseSize = Math.max(15, Math.round(total / count / 15) * 15)
 
-  // Per-day scheduling capacity, tomorrow through the deadline.
   const capacity = new Map<string, number>()
   for (let day = 1; day <= daysAvailable; day++) {
-    capacity.set(addDaysISO(todayIso, day), input.dailyMinutes)
+    capacity.set(addDaysISO(today, day), input.dailyMinutes)
   }
 
   const milestones: Milestone[] = []
@@ -65,12 +77,19 @@ export function generateMilestones(
   return milestones
 }
 
-export function computeProgress(goal: PlannerGoal): {
+/* ------------------------------------------------------------------ *
+ * 2. Progress + status                                                 *
+ * ------------------------------------------------------------------ */
+
+export interface GoalProgress {
   percent: number
   completed: number
   total: number
   remaining: number
-} {
+  daysLeft: number
+}
+
+export function computeProgress(goal: PlannerGoal, today = isoToday()): GoalProgress {
   const total = goal.milestones.length
   const completed = goal.milestones.filter((m) => m.status === 'completed').length
   return {
@@ -78,21 +97,20 @@ export function computeProgress(goal: PlannerGoal): {
     completed,
     total,
     remaining: total - completed,
+    daysLeft: daysUntilFrom(today, goal.deadline),
   }
 }
 
-export function computeGoalStatus(goal: PlannerGoal, todayIso = isoToday()): GoalStatus {
+export function computeGoalStatus(goal: PlannerGoal, today = isoToday()): GoalStatus {
   const milestones = goal.milestones
   if (milestones.length === 0) return 'on_track'
   if (milestones.every((m) => m.status === 'completed')) return 'completed'
 
   const total = milestones.length
   const completed = milestones.filter((m) => m.status === 'completed').length
-  const expectedDone = milestones.filter((m) => m.dueDate <= todayIso).length
-  const actual = completed / total
-  const expected = expectedDone / total
-  const behind = expected - actual
-  const daysLeft = daysUntilFrom(todayIso, goal.deadline)
+  const expectedDone = milestones.filter((m) => m.dueDate <= today).length
+  const behind = expectedDone / total - completed / total
+  const daysLeft = daysUntilFrom(today, goal.deadline)
 
   if (daysLeft < 0) return 'at_risk'
   if (behind <= 0.05) return 'on_track'
@@ -100,181 +118,201 @@ export function computeGoalStatus(goal: PlannerGoal, todayIso = isoToday()): Goa
   return 'needs_attention'
 }
 
-export interface TodayPlan {
-  items: PlanItem[]
-  plannedMinutes: number
-  budgetMinutes: number
-}
+/* ------------------------------------------------------------------ *
+ * 3. Missed-task rescheduling (respects daily study time)              *
+ * ------------------------------------------------------------------ */
 
 /**
- * Builds today's plan: overdue/due-today work first, then pulls future work
- * forward by urgency — never exceeding the combined daily study budget.
+ * Overdue tasks are never deleted — they are marked `missed` and their
+ * deadlines are pushed forward across future days within the daily budget.
  */
-export function buildTodayPlan(
-  goals: PlannerGoal[],
-  todayIso = isoToday(),
-): TodayPlan {
-  const activeGoals = goals.filter(
-    (goal) => computeGoalStatus(goal, todayIso) !== 'completed',
-  )
-  const budgetMinutes =
-    Math.min(600, activeGoals.reduce((sum, goal) => sum + goal.dailyMinutes, 0)) || 60
+export function rescheduleMissedWork(
+  tasks: Task[],
+  today = isoToday(),
+  dailyStudyMinutes = 180,
+): { rescheduledTasks: Task[]; rescheduledCount: number } {
+  let rescheduledCount = 0
 
-  const due: PlanItem[] = []
-  const upcoming: PlanItem[] = []
+  const rescheduledTasks = tasks.map((task) => {
+    const isOverdue =
+      (task.status === 'todo' || task.status === 'in_progress') &&
+      daysUntilFrom(today, task.dueDate) < 0
+    if (!isOverdue) return task
+
+    rescheduledCount += 1
+    const perDay = Math.max(1, Math.floor(dailyStudyMinutes / 60))
+    // Spread the recovered work over the next few days, capped by priority.
+    const spreadDays = task.priority === 'high' ? 1 : task.priority === 'medium' ? 2 : 3
+    void perDay
+    const nextDue = addDaysISO(today, spreadDays)
+    return { ...task, status: 'missed' as const, dueDate: nextDue }
+  })
+
+  return { rescheduledTasks, rescheduledCount }
+}
+
+/* ------------------------------------------------------------------ *
+ * 4. Today's plan (tasks + milestones, attendance-aware, time-capped)  *
+ * ------------------------------------------------------------------ */
+
+export interface BuildTodayPlanInput {
+  tasks: Task[]
+  goals: PlannerGoal[]
+  dailyStudyMinutes: number
+  riskBySubjectId: Map<string, SubjectStats>
+  today?: string
+}
+
+export function buildTodayPlan({
+  tasks,
+  goals,
+  dailyStudyMinutes,
+  riskBySubjectId,
+  today = isoToday(),
+}: BuildTodayPlanInput): TodayPlan {
+  const budgetMinutes = Math.max(30, dailyStudyMinutes)
+
+  const candidates: TodayPlanEntry[] = []
+
+  for (const task of tasks) {
+    if (task.status === 'done') continue
+    const subjectStats = task.subjectId ? riskBySubjectId.get(task.subjectId) : undefined
+    candidates.push({
+      id: `task:${task.id}`,
+      source: 'task',
+      title: task.title,
+      context: subjectStats?.name ?? (task.status === 'missed' ? 'Rescheduled' : 'General'),
+      priority: task.priority,
+      estimatedMinutes: Math.max(15, task.estimatedMinutes),
+      dueDate: task.dueDate,
+      risk: subjectStats?.risk,
+      subjectId: task.subjectId,
+    })
+  }
+
   for (const goal of goals) {
+    if (computeGoalStatus(goal, today) === 'completed') continue
     for (const milestone of goal.milestones) {
       if (milestone.status !== 'pending') continue
-      const item: PlanItem = {
-        goalId: goal.id,
-        milestoneId: milestone.id,
+      candidates.push({
+        id: `milestone:${milestone.id}`,
+        source: 'milestone',
         title: milestone.title,
-        goalName: goal.name,
+        context: goal.name,
         priority: goal.priority,
         estimatedMinutes: milestone.estimatedMinutes,
         dueDate: milestone.dueDate,
-      }
-      ;(milestone.dueDate <= todayIso ? due : upcoming).push(item)
+        goalId: goal.id,
+      })
     }
   }
 
-  const byUrgency = (a: PlanItem, b: PlanItem) => urgencyScore(b) - urgencyScore(a)
-  const ordered = [...due.sort(byUrgency), ...upcoming.sort(byUrgency)]
+  const scored = [...candidates].sort((a, b) => score(b, today) - score(a, today))
 
-  const items: PlanItem[] = []
+  const entries: TodayPlanEntry[] = []
   let plannedMinutes = 0
-  for (const item of ordered) {
-    if (plannedMinutes + item.estimatedMinutes > budgetMinutes) continue
-    items.push(item)
-    plannedMinutes += item.estimatedMinutes
+  for (const entry of scored) {
+    if (plannedMinutes + entry.estimatedMinutes > budgetMinutes) continue
+    entries.push(entry)
+    plannedMinutes += entry.estimatedMinutes
   }
 
-  return { items, plannedMinutes, budgetMinutes }
+  return {
+    entries,
+    plannedMinutes,
+    budgetMinutes,
+    rescheduledCount: tasks.filter((t) => t.status === 'missed').length,
+  }
 }
 
-export interface RescheduleResult {
+function score(entry: TodayPlanEntry, today: string): number {
+  const daysLeft = Math.max(0, daysUntilFrom(today, entry.dueDate))
+  const urgency = 12 / (daysLeft + 1)
+  const priority = PRIORITY_WEIGHT[entry.priority] * 3
+  // Attendance risk pulls at-risk subject work forward.
+  const riskBoost = entry.risk === 'high' ? 10 : entry.risk === 'medium' ? 5 : 0
+  const missedBoost = entry.source === 'task' ? 2 : 0
+  return urgency + priority + riskBoost + missedBoost
+}
+
+/* ------------------------------------------------------------------ *
+ * 5. Suggestions (rule-based now, AI-ready output shape)               *
+ * ------------------------------------------------------------------ */
+
+export function getPlannerSuggestions({
+  goals,
+  attendancePercent,
+  plan,
+  tasks = [],
+  today = isoToday(),
+}: {
   goals: PlannerGoal[]
-  rescheduledCount: number
-}
+  attendancePercent: number
+  plan: TodayPlan
+  tasks?: Task[]
+  today?: string
+}): Suggestion[] {
+  const out: Suggestion[] = []
 
-/**
- * Marks overdue pending work as missed and redistributes all remaining
- * pending milestones across future days without exceeding daily study time.
- */
-export function rescheduleMissedTasks(
-  goals: PlannerGoal[],
-  todayIso = isoToday(),
-): RescheduleResult {
-  let rescheduledCount = 0
-
-  const nextGoals = goals.map((goal) => {
-    const hasOverdue = goal.milestones.some(
-      (m) => m.status === 'pending' && m.dueDate < todayIso,
-    )
-    if (!hasOverdue) return goal
-
-    const markedMissed = goal.milestones.map((m) =>
-      m.status === 'pending' && m.dueDate < todayIso
-        ? { ...m, status: 'missed' as const }
-        : { ...m },
-    )
-
-    // Refit remaining pending work, earliest original due date first.
-    const horizon = Math.max(14, daysUntilFrom(todayIso, goal.deadline) + 14)
-    const capacity = new Map<string, number>()
-    for (let day = 0; day <= horizon; day++) {
-      capacity.set(addDaysISO(todayIso, day), goal.dailyMinutes)
-    }
-
-    const pending = markedMissed
-      .filter((m) => m.status === 'pending')
-      .sort((a, b) => a.dueDate.localeCompare(b.dueDate) || a.id.localeCompare(b.id))
-
-    for (const milestone of pending) {
-      for (const [day, dayCapacity] of capacity) {
-        if (dayCapacity >= milestone.estimatedMinutes) {
-          milestone.dueDate = day
-          capacity.set(day, dayCapacity - milestone.estimatedMinutes)
-          break
-        }
-      }
-    }
-
-    rescheduledCount += pending.length
-    return { ...goal, milestones: markedMissed }
-  })
-
-  return { goals: nextGoals, rescheduledCount }
-}
-
-/** Rule-based recommendations. Swap with an AI call later; same return shape. */
-export function getSuggestions(
-  goals: PlannerGoal[],
-  attendancePercent: number,
-  plan: TodayPlan,
-  todayIso = isoToday(),
-): Suggestion[] {
-  const suggestions: Suggestion[] = []
-
-  if (goals.length === 0) {
-    suggestions.push({
-      id: 's-start',
+  if (goals.length === 0 && tasks.length === 0) {
+    out.push({
+      id: 'planner-start',
       tone: 'info',
       message:
-        'Create your first goal on the left — the planner will split it into daily tasks automatically.',
+        'Create your first goal — the planner breaks it into daily tasks automatically.',
     })
-    return suggestions
+    return out
   }
 
-  const statuses = goals.map((goal) => ({ goal, status: computeGoalStatus(goal, todayIso) }))
-  const atRisk = statuses.filter((entry) => entry.status === 'at_risk')
-  if (atRisk.length > 0 && atRisk[0]) {
-    suggestions.push({
-      id: 's-risk',
-      tone: 'warning',
-      message: `"${atRisk[0].goal.name}" is at risk. Clear its tasks on today's plan before starting anything new.`,
+  if (attendancePercent < RISK_THRESHOLDS.high) {
+    out.push({
+      id: 'planner-attendance',
+      tone: 'danger',
+      message: `Attendance is at risk (${attendancePercent}%). Attend classes before adding extra study blocks.`,
     })
-  }
-
-  if (attendancePercent < 75) {
-    suggestions.push({
-      id: 's-attendance',
-      tone: 'warning',
-      message: `Attendance is ${attendancePercent}% — attend every class this week before adding extra study blocks.`,
-    })
-  } else if (attendancePercent >= 90 && atRisk.length === 0) {
-    suggestions.push({
-      id: 's-streak',
+  } else if (attendancePercent >= RISK_THRESHOLDS.medium) {
+    out.push({
+      id: 'planner-streak',
       tone: 'success',
-      message: `Attendance at ${attendancePercent}% and goals on track — keep the streak going.`,
+      message: `Attendance at ${attendancePercent}% — keep the streak going while you clear today's plan.`,
     })
   }
 
-  if (
-    plan.items.length > 0 &&
-    plan.plannedMinutes >= plan.budgetMinutes &&
-    plan.budgetMinutes >= 60
-  ) {
-    suggestions.push({
-      id: 's-capacity',
+  const atRisk = goals
+    .map((goal) => ({ goal, status: computeGoalStatus(goal, today) }))
+    .filter((entry) => entry.status === 'at_risk')
+  const first = atRisk[0]
+  if (first) {
+    out.push({
+      id: 'planner-at-risk',
+      tone: 'warning',
+      message: `"${first.goal.name}" is at risk. Clear its tasks on today's plan before starting anything new.`,
+    })
+  }
+
+  if (plan.entries.length > 0 && plan.plannedMinutes >= plan.budgetMinutes) {
+    out.push({
+      id: 'planner-full',
       tone: 'info',
-      message: `Today is fully booked (${plan.plannedMinutes}m). Lower-priority work was pushed to later days.`,
+      message: `Today is fully booked (${plan.plannedMinutes}m). Lower-priority work moved to later days.`,
     })
   }
 
   const crunch = goals.find(
     (goal) =>
       goal.milestones.some((m) => m.status === 'pending') &&
-      daysUntilFrom(todayIso, goal.deadline) <= 3 &&
-      daysUntilFrom(todayIso, goal.deadline) >= 0,
+      daysUntilFrom(today, goal.deadline) <= 3 &&
+      daysUntilFrom(today, goal.deadline) >= 0,
   )
   if (crunch) {
-    suggestions.push({
-      id: 's-deadline',
+    out.push({
+      id: 'planner-deadline',
       tone: 'warning',
       message: `"${crunch.name}" is due within 3 days — consider raising its daily study time.`,
     })
   }
 
-  return suggestions.slice(0, 4)
+  return out.slice(0, 4)
 }
+
+export type { Recommendation, TaskPriority }

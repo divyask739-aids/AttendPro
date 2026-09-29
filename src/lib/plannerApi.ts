@@ -1,75 +1,26 @@
-import {
-  addDaysISO,
-  isoToday,
-  makeId,
-} from '@/features/planner/plannerMeta'
 import { generateMilestones } from '@/features/planner/plannerEngine'
+import { isoToday, makeId } from '@/lib/date'
+import { dataKey, isArrayOfObjects, readStore, writeStore } from '@/lib/storage'
 import type { MilestoneStatus, NewGoalInput, PlannerGoal } from '@/features/planner/types'
 
-const STORAGE_KEY = 'attendpro.planner.v1'
-const SEED_FLAG = 'attendpro.planner.v1.seeded'
-const PERSIST_DELAY_MS = 120
-
 /**
- * Local persistence layer for the planner. Goals survive refreshes and
- * logins. When a backend exists, replace these function bodies with real
- * API calls — signatures already match an async repository.
+ * Planner goals are stored per user so a student's plan survives refresh
+ * and is never visible to another account.
  */
 
-function read(): PlannerGoal[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return []
-    const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter(
-      (item): item is PlannerGoal =>
-        typeof item?.id === 'string' &&
-        typeof item?.name === 'string' &&
-        Array.isArray(item?.milestones),
-    )
-  } catch {
-    return []
-  }
+function readGoals(email: string): PlannerGoal[] {
+  const value: unknown = readStore<unknown>(dataKey(email, 'planner.goals'), [])
+  return isArrayOfObjects<PlannerGoal>(value) ? value : []
 }
 
-function write(goals: PlannerGoal[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(goals))
+export async function fetchPlannerGoals(email: string): Promise<PlannerGoal[]> {
+  return readGoals(email)
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function ensureSeed(): void {
-  if (read().length === 0) {
-    const input: NewGoalInput = {
-      name: 'Prepare for DS midterm',
-      category: 'exam',
-      deadline: addDaysISO(isoToday(), 10),
-      priority: 'high',
-      dailyMinutes: 90,
-    }
-    const id = makeId('goal')
-    const goal: PlannerGoal = {
-      id,
-      ...input,
-      createdAt: new Date().toISOString(),
-      milestones: generateMilestones(id, input),
-    }
-    write([goal])
-  }
-  localStorage.setItem(SEED_FLAG, '1')
-}
-
-export async function fetchPlannerGoals(): Promise<PlannerGoal[]> {
-  ensureSeed()
-  await delay(PERSIST_DELAY_MS)
-  return structuredClone(read())
-}
-
-export async function createPlannerGoal(input: NewGoalInput): Promise<PlannerGoal> {
-  const goals = read()
+export async function createPlannerGoal(
+  email: string,
+  input: NewGoalInput,
+): Promise<PlannerGoal> {
   const id = makeId('goal')
   const goal: PlannerGoal = {
     id,
@@ -77,36 +28,44 @@ export async function createPlannerGoal(input: NewGoalInput): Promise<PlannerGoa
     createdAt: new Date().toISOString(),
     milestones: generateMilestones(id, input),
   }
-  write([goal, ...goals])
-  await delay(PERSIST_DELAY_MS)
-  return structuredClone(goal)
+  writeStore(dataKey(email, 'planner.goals'), [goal, ...readGoals(email)])
+  return goal
 }
 
 export async function setMilestoneStatus(
+  email: string,
   goalId: string,
   milestoneId: string,
-  status: Extract<MilestoneStatus, 'completed' | 'pending'>,
+  done: boolean,
 ): Promise<void> {
-  const goals = read().map((goal) => {
-    if (goal.id !== goalId) return goal
-    return {
-      ...goal,
-      milestones: goal.milestones.map((milestone) =>
-        milestone.id === milestoneId
-          ? {
-              ...milestone,
-              status,
-              completedAt: status === 'completed' ? new Date().toISOString() : undefined,
-            }
-          : milestone,
-      ),
-    }
-  })
-  write(goals)
-  await delay(PERSIST_DELAY_MS)
+  const status: MilestoneStatus = done ? 'completed' : 'pending'
+  const goals = readGoals(email).map((goal) =>
+    goal.id === goalId
+      ? {
+          ...goal,
+          milestones: goal.milestones.map((milestone) =>
+            milestone.id === milestoneId
+              ? {
+                  ...milestone,
+                  status,
+                  completedAt: done ? new Date().toISOString() : undefined,
+                }
+              : milestone,
+          ),
+        }
+      : goal,
+  )
+  writeStore(dataKey(email, 'planner.goals'), goals)
 }
 
-export async function savePlannerGoals(goals: PlannerGoal[]): Promise<void> {
-  write(goals)
-  await delay(PERSIST_DELAY_MS)
+export async function updatePlannerGoal(
+  email: string,
+  goal: PlannerGoal,
+): Promise<void> {
+  writeStore(
+    dataKey(email, 'planner.goals'),
+    readGoals(email).map((item) => (item.id === goal.id ? goal : item)),
+  )
 }
+
+export { isoToday }

@@ -1,4 +1,11 @@
-import type { TaskPriority } from '@/types'
+/**
+ * AI Goal Planner domain types.
+ *
+ * `Suggestion` is intentionally the shared `Recommendation` shape so the
+ * rule-based planner and any future AI call return identical structures.
+ */
+
+import type { Recommendation, TaskPriority } from '@/types'
 
 export type GoalCategory =
   | 'exam'
@@ -16,9 +23,7 @@ export interface Milestone {
   id: string
   goalId: string
   title: string
-  /** Estimated effort in minutes */
   estimatedMinutes: number
-  /** ISO date this milestone is scheduled for */
   dueDate: string
   status: MilestoneStatus
   completedAt?: string
@@ -28,12 +33,9 @@ export interface PlannerGoal {
   id: string
   name: string
   category: GoalCategory
-  /** ISO date */
   deadline: string
   priority: TaskPriority
-  /** Minutes the student can study per day for this goal */
   dailyMinutes: number
-  /** ISO date */
   createdAt: string
   milestones: Milestone[]
 }
@@ -46,18 +48,25 @@ export interface NewGoalInput {
   dailyMinutes: number
 }
 
-export interface PlanItem {
-  goalId: string
-  milestoneId: string
+export interface TodayPlanEntry {
+  /** task id or milestone id, prefixed to stay unique */
+  id: string
+  source: 'task' | 'milestone'
   title: string
-  goalName: string
+  context: string
   priority: TaskPriority
   estimatedMinutes: number
   dueDate: string
+  risk?: 'high' | 'medium' | 'safe'
+  goalId?: string
+  subjectId?: string | null
 }
 
-export interface Suggestion {
-  id: string
-  tone: 'info' | 'success' | 'warning'
-  message: string
+export interface TodayPlan {
+  entries: TodayPlanEntry[]
+  plannedMinutes: number
+  budgetMinutes: number
+  rescheduledCount: number
 }
+
+export type Suggestion = Recommendation
