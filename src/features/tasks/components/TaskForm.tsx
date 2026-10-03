@@ -4,7 +4,9 @@ import { useAttendance } from '@/hooks/useAttendance'
 import { useTaskMutations } from '@/hooks/useStudentData'
 import { addDaysISO, isoToday } from '@/lib/date'
 import type { Subject } from '@/types'
-import type { Task, TaskPriority, TaskStatus } from '@/types'
+import type { Task, TaskPriority, TaskReminder, TaskStatus } from '@/types'
+
+import { REMINDER_OPTIONS, reminderOf } from '../taskMeta'
 
 const inputClass =
   'w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none transition-colors focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100'
@@ -13,7 +15,11 @@ const labelClass = 'mb-1 block text-xs font-medium text-slate-600'
 interface TaskFormProps {
   email: string
   editing?: Task | null
-  onDone: () => void
+  /**
+   * Called after a successful save. `taskId` is only present when an existing
+   * task was edited, so the caller can reset that task's reminder history.
+   */
+  onDone: (result?: { taskId: string }) => void
 }
 
 type FormState = {
@@ -24,6 +30,7 @@ type FormState = {
   estimatedMinutes: number
   priority: TaskPriority
   status: TaskStatus
+  reminder: TaskReminder
 }
 
 const emptyForm = (): FormState => ({
@@ -34,6 +41,7 @@ const emptyForm = (): FormState => ({
   estimatedMinutes: 60,
   priority: 'medium',
   status: 'todo',
+  reminder: 'none',
 })
 
 export function TaskForm({ email, editing, onDone }: TaskFormProps) {
@@ -49,6 +57,8 @@ export function TaskForm({ email, editing, onDone }: TaskFormProps) {
           estimatedMinutes: editing.estimatedMinutes,
           priority: editing.priority,
           status: editing.status,
+          // Older tasks have no reminder — fall back to 'none'.
+          reminder: reminderOf(editing),
         }
       : emptyForm(),
   )
@@ -68,15 +78,20 @@ export function TaskForm({ email, editing, onDone }: TaskFormProps) {
       estimatedMinutes: Math.max(15, Number(form.estimatedMinutes) || 60),
       priority: form.priority,
       status: form.status,
+      reminder: form.reminder,
     }
+
+    setForm(emptyForm())
 
     if (editing) {
       await editTask.mutateAsync({ ...editing, ...payload })
+      // The task may have a different reminder now, so its history is reset.
+      onDone({ taskId: editing.id })
     } else {
       await addTask.mutateAsync(payload)
+      // A brand new task has never notified, so no reset is needed.
+      onDone()
     }
-    setForm(emptyForm())
-    onDone()
   }
 
   return (
@@ -177,6 +192,27 @@ export function TaskForm({ email, editing, onDone }: TaskFormProps) {
             className={inputClass}
           />
         </div>
+
+        <div className="sm:col-span-2">
+          <label htmlFor="task-reminder" className={labelClass}>
+            Reminder
+          </label>
+          <select
+            id="task-reminder"
+            value={form.reminder}
+            onChange={(e) => setForm({ ...form, reminder: e.target.value as TaskReminder })}
+            className={inputClass}
+          >
+            {REMINDER_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-[11px] text-slate-400">
+            Reminders appear on the Tasks page and, once enabled, as browser notifications.
+          </p>
+        </div>
       </div>
 
       <div className="mt-4 flex gap-2">
@@ -190,7 +226,7 @@ export function TaskForm({ email, editing, onDone }: TaskFormProps) {
         {editing && (
           <button
             type="button"
-            onClick={onDone}
+            onClick={() => onDone()}
             className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600"
           >
             Cancel

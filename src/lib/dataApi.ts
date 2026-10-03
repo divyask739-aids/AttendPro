@@ -1,4 +1,5 @@
 import { rescheduleMissedWork } from '@/features/planner/plannerEngine'
+import { reminderOf } from '@/features/tasks/taskMeta'
 import { isoToday, makeId } from '@/lib/date'
 import { subjectKey } from '@/lib/subjectKey'
 import {
@@ -279,7 +280,13 @@ export async function setSubjectCounters(
 
 function readTasks(email: string): Task[] {
   const value: unknown = readStore<unknown>(dataKey(email, 'tasks'), [])
-  return isArrayOfObjects<Task>(value) ? value : []
+  if (!isArrayOfObjects<Task>(value)) return []
+  // Backward compatibility: tasks stored before reminders existed have no
+  // `reminder` field, so they are read back as `'none'`.
+  return value.map((task) => ({
+    ...task,
+    reminder: reminderOf(task),
+  }))
 }
 
 export async function fetchTasks(email: string): Promise<Task[]> {
@@ -289,17 +296,18 @@ export async function fetchTasks(email: string): Promise<Task[]> {
 export type TaskInput = Omit<Task, 'id'>
 
 export async function createTask(email: string, input: TaskInput): Promise<Task> {
-  const task: Task = { id: makeId('task'), ...input }
+  const task: Task = { ...input, reminder: reminderOf(input), id: makeId('task') }
   writeStore(dataKey(email, 'tasks'), [task, ...readTasks(email)])
   return task
 }
 
 export async function updateTask(email: string, task: Task): Promise<Task> {
+  const updated: Task = { ...task, reminder: reminderOf(task) }
   writeStore(
     dataKey(email, 'tasks'),
-    readTasks(email).map((item) => (item.id === task.id ? task : item)),
+    readTasks(email).map((item) => (item.id === updated.id ? updated : item)),
   )
-  return task
+  return updated
 }
 
 export async function patchTask(
@@ -310,7 +318,7 @@ export async function patchTask(
   const tasks = readTasks(email)
   const current = tasks.find((item) => item.id === taskId)
   if (!current) return null
-  const updated: Task = { ...current, ...patch }
+  const updated: Task = { ...current, ...patch, reminder: reminderOf({ ...current, ...patch }) }
   writeStore(
     dataKey(email, 'tasks'),
     tasks.map((item) => (item.id === taskId ? updated : item)),

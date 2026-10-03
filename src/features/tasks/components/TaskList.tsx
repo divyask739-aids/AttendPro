@@ -1,6 +1,6 @@
 import { Badge } from '@/components/ui/Badge'
-import { ClockIcon } from '@/components/icons'
-import { PRIORITY_DOT, PRIORITY_LABEL, PRIORITY_TONE } from '@/features/tasks/taskMeta'
+import { BellIcon, ClockIcon } from '@/components/icons'
+import { PRIORITY_DOT, PRIORITY_LABEL, PRIORITY_TONE, reminderLabel, reminderOf } from '@/features/tasks/taskMeta'
 import { RISK_DOT, RISK_LABEL, RISK_TONE } from '@/lib/attendance'
 import { attendanceRecommendation } from '@/lib/attendance'
 import { cn, daysUntil, dueDateLabel } from '@/lib/utils'
@@ -45,6 +45,7 @@ export function TaskList({
         const overdue = task.status !== 'done' && daysUntil(task.dueDate) < 0
         const subject = task.subjectId ? bySubjectId.get(task.subjectId) : undefined
         const isDone = task.status === 'done'
+        const reminder = reminderOf(task)
         // At-risk subject + high priority = visually highlighted.
         const highlight = !isDone && subject?.risk === 'high' && task.priority === 'high'
 
@@ -95,6 +96,15 @@ export function TaskList({
                     <>
                       <span aria-hidden="true">·</span>
                       <span>{task.estimatedMinutes}m</span>
+                    </>
+                  )}
+                  {reminder !== 'none' && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="inline-flex items-center gap-1 text-indigo-600">
+                        <BellIcon className="h-3.5 w-3.5" />
+                        {reminderLabel(reminder)}
+                      </span>
                     </>
                   )}
                 </div>

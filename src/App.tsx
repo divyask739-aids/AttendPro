@@ -43,7 +43,7 @@ function ProfileRoute() {
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
+      <BrowserRouter basename="/AttendPro">
         <Routes>
           <Route path="/login" element={<LoginPage />} />
 

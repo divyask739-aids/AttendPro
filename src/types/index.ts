@@ -59,6 +59,9 @@ export interface AttendanceRecord {
 export type TaskPriority = 'low' | 'medium' | 'high'
 export type TaskStatus = 'todo' | 'in_progress' | 'done' | 'missed'
 
+/** How early a task should notify the student. `none` disables it. */
+export type TaskReminder = 'none' | '15m' | '30m' | '1h' | '1d'
+
 export interface Task {
   id: string
   title: string
@@ -69,6 +72,7 @@ export interface Task {
   estimatedMinutes: number
   priority: TaskPriority
   status: TaskStatus
+  reminder: TaskReminder
 }
 
 export interface ProductivityGoal {

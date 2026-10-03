@@ -1,11 +1,13 @@
 import { useMemo, useState } from 'react'
 
 import { RecommendationsCard } from '@/components/RecommendationsCard'
+import { ReminderBell } from '@/features/tasks/components/ReminderBell'
 import { TaskForm } from '@/features/tasks/components/TaskForm'
 import { TaskList } from '@/features/tasks/components/TaskList'
 import { useAttendance } from '@/hooks/useAttendance'
 import { useRecommendations } from '@/hooks/useRecommendations'
 import { useTaskMutations } from '@/hooks/useStudentData'
+import { useTaskReminders } from '@/hooks/useTaskReminders'
 import { useTasks } from '@/hooks/useTasks'
 import type { Task, TaskStatus } from '@/types'
 
@@ -35,13 +37,37 @@ export function TasksPage({ email }: { email: string }) {
 
   const missedCount = tasks.filter((t) => t.status === 'missed').length
 
+  const subjectNameById = useMemo(
+    () =>
+      new Map(
+        (summary?.subjects ?? []).map((subject) => [subject.id, subject.name] as const),
+      ),
+    [summary],
+  )
+
+  // One reminder instance for the whole page, so an edit can clear the history.
+  const reminders = useTaskReminders(tasks, { scope: email, subjectNameById })
+
   return (
     <div>
       <header>
-        <h1 className="text-xl font-bold tracking-tight text-slate-900 lg:text-2xl">Tasks</h1>
-        <p className="mt-1 text-sm text-slate-500">
-          Tasks stay connected to your subjects and attendance risk.
-        </p>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-bold tracking-tight text-slate-900 lg:text-2xl">Tasks</h1>
+            <p className="mt-1 text-sm text-slate-500">
+              Tasks stay connected to your subjects and attendance risk.
+            </p>
+          </div>
+          <ReminderBell
+            dueReminders={reminders.dueReminders}
+            dueCount={reminders.dueCount}
+            permission={reminders.permission}
+            isSupported={reminders.isSupported}
+            onRequestPermission={reminders.requestPermission}
+            onDismiss={reminders.dismiss}
+            onDismissAll={reminders.dismissAll}
+          />
+        </div>
       </header>
 
       <div className="mt-4 space-y-4">
@@ -49,7 +75,9 @@ export function TasksPage({ email }: { email: string }) {
           <TaskForm
             email={email}
             editing={editing}
-            onDone={() => {
+            onDone={(result) => {
+              // Editing can change the reminder, so let it fire again.
+              if (result?.taskId) reminders.resetForTask(result.taskId)
               setEditing(null)
               setShowForm(false)
             }}
