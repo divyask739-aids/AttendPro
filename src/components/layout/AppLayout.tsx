@@ -1,4 +1,4 @@
-import { Outlet } from 'react-router-dom'
+import { Navigate, Outlet } from 'react-router-dom'
 
 import { BookOpenIcon, UsersIcon } from '@/components/icons'
 import { useAuthMutations, useSession } from '@/hooks/useStudentData'
@@ -84,5 +84,3 @@ export function StaffOnly({ children }: { children: React.ReactNode }) {
 function NavigateTo({ role }: { role: 'student' | 'staff' }) {
   return <Navigate to={role === 'staff' ? '/staff' : '/'} replace />
 }
-
-import { Navigate } from 'react-router-dom'
