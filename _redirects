@@ -1,0 +1,8 @@
+# Cloudflare Pages SPA fallback.
+#
+# The app uses client-side routing (BrowserRouter), so every deep link such as
+# /tasks, /attendance or /planner must be served index.html instead of 404ing.
+#
+# If you deploy under a sub-folder, prefix both sides with that folder, e.g.
+# /AttendPro/* /AttendPro/index.html 200
+/*    /index.html   200
