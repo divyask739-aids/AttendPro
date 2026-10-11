@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom'
 
 import { AppLayout } from '@/components/layout/AppLayout'
 import { RequireAuth, RequireRole } from '@/components/RouteGuards'
@@ -36,8 +36,13 @@ function Scoped({ children }: { children: (email: string) => React.ReactNode }) 
 
 function ProfileRoute() {
   const { session } = useSession()
+  const location = useLocation()
   if (!session) return null
-  return <ProfilePage email={session.email} role={session.role} />
+  return (
+    <div key={location.pathname} className="page-enter">
+      <ProfilePage email={session.email} role={session.role} />
+    </div>
+  )
 }
 
 export default function App() {

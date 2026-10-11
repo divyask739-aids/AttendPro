@@ -1,4 +1,4 @@
-import { Navigate, Outlet } from 'react-router-dom'
+import { Navigate, Outlet, useLocation } from 'react-router-dom'
 
 import { BookOpenIcon, UsersIcon } from '@/components/icons'
 import { useAuthMutations, useSession } from '@/hooks/useStudentData'
@@ -8,6 +8,7 @@ import { NavLinks } from './nav'
 export function AppLayout() {
   const { session } = useSession()
   const { logout } = useAuthMutations()
+  const location = useLocation()
   const role = session?.role ?? 'student'
   const isStaff = role === 'staff'
 
@@ -50,7 +51,10 @@ export function AppLayout() {
           </p>
         </header>
         <main className="mx-auto w-full max-w-5xl px-4 pb-24 pt-6 lg:px-8 lg:pb-12 lg:pt-8">
-          <Outlet />
+          {/* Keying by pathname replays the entrance animation on each route change. */}
+          <div key={location.pathname} className="page-enter">
+            <Outlet />
+          </div>
         </main>
       </div>
 

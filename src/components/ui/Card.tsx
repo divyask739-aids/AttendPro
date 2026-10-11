@@ -14,7 +14,12 @@ export function Card({ title, description, action, className, children }: CardPr
   const hasHeader = Boolean(title || action)
 
   return (
-    <section className={cn('rounded-2xl border border-slate-200 bg-white shadow-sm', className)}>
+    <section
+      className={cn(
+        'motion-card rounded-2xl border border-slate-200 bg-white shadow-sm',
+        className,
+      )}
+    >
       {hasHeader && (
         <div className="flex items-center justify-between gap-2 px-5 pt-5">
           <div>

@@ -3,3 +3,151 @@
 body {
   @apply bg-slate-100 text-slate-900 antialiased;
 }
+
+/* ================================================================== *
+ * AttendPro motion layer
+ *
+ * Pure CSS keyframes + utilities. No animation library is added, and
+ * every effect is short, subtle and layout-shift free (transform/opacity
+ * only). `prefers-reduced-motion` is respected at the bottom of the file.
+ * ================================================================== */
+
+@keyframes ap-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ap-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ap-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes ap-progress-in {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* Entrance utilities. `both` keeps the element hidden before it starts and
+   holds its final state, so nothing flashes or shifts. */
+.animate-fade-up {
+  animation: ap-fade-up 0.36s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-fade-in {
+  animation: ap-fade-in 0.3s ease-out both;
+}
+
+.animate-scale-in {
+  animation: ap-scale-in 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Route change transition, applied around the router Outlet. */
+.page-enter {
+  animation: ap-fade-up 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.motion-card {
+  animation: ap-fade-up 0.36s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.motion-metric {
+  animation: ap-scale-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.motion-metric:nth-child(2) {
+  animation-delay: 45ms;
+}
+
+.motion-metric:nth-child(3) {
+  animation-delay: 90ms;
+}
+
+.motion-metric:nth-child(4) {
+  animation-delay: 135ms;
+}
+
+.motion-progress-fill {
+  animation: ap-progress-in 0.65s cubic-bezier(0.22, 1, 0.36, 1) both;
+  transform-origin: left;
+}
+
+/* ---------------------------- buttons ----------------------------- */
+
+/* One shared transition so Login, Add Task, Save, Edit, Delete and nav all
+   feel identical without touching every component. */
+button,
+a {
+  transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+  transition-duration: 180ms;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Subtle lift + press feedback. Kept very small on purpose. */
+button:not(:disabled):hover {
+  transform: translateY(-1px) scale(1.015);
+}
+
+button:not(:disabled):active {
+  transform: scale(0.97);
+  transition-duration: 80ms;
+}
+
+a:active {
+  transform: scale(0.98);
+}
+
+/* ----------------------------- inputs ----------------------------- */
+
+/* Animates the focus ring smoothly instead of snapping. */
+input,
+select,
+textarea {
+  transition:
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    background-color 180ms ease;
+}
+
+/* ------------------------ reduced motion -------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  button:not(:disabled):hover,
+  button:not(:disabled):active,
+  a:active {
+    transform: none !important;
+  }
+}

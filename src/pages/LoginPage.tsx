@@ -77,7 +77,7 @@ export function LoginPage() {
   return (
     <div className="flex min-h-dvh flex-col bg-slate-100">
       <div className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center px-4 py-10">
-        <div className="mb-6 flex items-center gap-3">
+        <div className="animate-fade-up mb-6 flex items-center gap-3">
           <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-indigo-600 text-white">
             <BookOpenIcon className="h-6 w-6" />
           </span>
@@ -89,7 +89,10 @@ export function LoginPage() {
           </div>
         </div>
 
-        <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div
+          className="animate-fade-up rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"
+          style={{ animationDelay: '60ms' }}
+        >
           <div className="grid grid-cols-2 gap-2">
             {(['student', 'staff'] as UserRole[]).map((option) => (
               <button
@@ -137,88 +140,94 @@ export function LoginPage() {
           </div>
 
           {formError && (
-            <p className="mt-4 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600">
+            <p
+              role="alert"
+              className="animate-fade-in mt-4 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600"
+            >
               {formError}
             </p>
           )}
 
-          {mode === 'login' ? (
-            <form onSubmit={onLogin} className="mt-4 space-y-3" noValidate>
-              <div>
-                <label htmlFor="login-email" className={labelClass}>
-                  Email
-                </label>
-                <input
-                  id="login-email"
-                  type="email"
-                  required
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  placeholder="you@college.edu"
-                  className={inputClass}
-                />
-              </div>
-              <p className="text-[11px] text-slate-400">
-                First time? Switch to "Create account" to register as a{' '}
-                {role === 'student' ? 'student' : 'staff member'}.
-              </p>
-              <button
-                type="submit"
-                disabled={login.isPending}
-                className="w-full rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-slate-700 disabled:opacity-60"
-              >
-                {login.isPending ? 'Signing in...' : `Continue as ${role}`}
-              </button>
-            </form>
-          ) : (
-            <form onSubmit={onRegister} className="mt-4 space-y-3" noValidate>
-              <div>
-                <label htmlFor="reg-name" className={labelClass}>
-                  Full name
-                </label>
-                <input
-                  id="reg-name"
-                  type="text"
-                  placeholder="Ada Lovelace"
-                  className={inputClass}
-                  {...formRegister('fullName')}
-                />
-                {errors.fullName && <p className={errorClass}>{errors.fullName.message}</p>}
-              </div>
-              <div>
-                <label htmlFor="reg-email" className={labelClass}>
-                  Email
-                </label>
-                <input
-                  id="reg-email"
-                  type="email"
-                  placeholder="you@college.edu"
-                  className={inputClass}
-                  {...formRegister('email')}
-                />
-                {errors.email && <p className={errorClass}>{errors.email.message}</p>}
-              </div>
-              <div>
-                <label htmlFor="reg-id" className={labelClass}>
-                  {role === 'student' ? 'Student ID (optional)' : 'Staff ID (optional)'}
-                </label>
-                <input
-                  id="reg-id"
-                  type="text"
-                  placeholder={role === 'student' ? 'ST101' : 'FAC1024'}
-                  className={inputClass}
-                  {...formRegister(role === 'student' ? 'studentId' : 'staffId')}
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={register.isPending}
-                className="w-full rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-indigo-500 disabled:opacity-60"
-              >
-                {register.isPending ? 'Creating account...' : 'Create account'}
-              </button>
-            </form>
-          )}
+          {/* Keyed by mode so switching Log in / Create account replays the entrance. */}
+          <div key={mode} className="animate-fade-up">
+            {mode === 'login' ? (
+              <form onSubmit={onLogin} className="mt-4 space-y-3" noValidate>
+                <div className="animate-fade-in" style={{ animationDelay: '20ms' }}>
+                  <label htmlFor="login-email" className={labelClass}>
+                    Email
+                  </label>
+                  <input
+                    id="login-email"
+                    type="email"
+                    required
+                    value={email}
+                    onChange={(event) => setEmail(event.target.value)}
+                    placeholder="you@college.edu"
+                    className={`${inputClass} input-anim`}
+                  />
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  First time? Switch to "Create account" to register as a{' '}
+                  {role === 'student' ? 'student' : 'staff member'}.
+                </p>
+                <button
+                  type="submit"
+                  disabled={login.isPending}
+                  className="w-full rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-slate-700 hover:shadow-md disabled:opacity-60"
+                >
+                  {login.isPending ? 'Signing in...' : `Continue as ${role}`}
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={onRegister} className="mt-4 space-y-3" noValidate>
+                <div className="animate-fade-in" style={{ animationDelay: '20ms' }}>
+                  <label htmlFor="reg-name" className={labelClass}>
+                    Full name
+                  </label>
+                  <input
+                    id="reg-name"
+                    type="text"
+                    placeholder="Ada Lovelace"
+                    className={`${inputClass} input-anim`}
+                    {...formRegister('fullName')}
+                  />
+                  {errors.fullName && <p className={errorClass}>{errors.fullName.message}</p>}
+                </div>
+                <div className="animate-fade-in" style={{ animationDelay: '70ms' }}>
+                  <label htmlFor="reg-email" className={labelClass}>
+                    Email
+                  </label>
+                  <input
+                    id="reg-email"
+                    type="email"
+                    placeholder="you@college.edu"
+                    className={`${inputClass} input-anim`}
+                    {...formRegister('email')}
+                  />
+                  {errors.email && <p className={errorClass}>{errors.email.message}</p>}
+                </div>
+                <div className="animate-fade-in" style={{ animationDelay: '120ms' }}>
+                  <label htmlFor="reg-id" className={labelClass}>
+                    {role === 'student' ? 'Student ID (optional)' : 'Staff ID (optional)'}
+                  </label>
+                  <input
+                    id="reg-id"
+                    type="text"
+                    placeholder={role === 'student' ? 'ST101' : 'FAC1024'}
+                    className={`${inputClass} input-anim`}
+                    {...formRegister(role === 'student' ? 'studentId' : 'staffId')}
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={register.isPending}
+                  className="w-full rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-indigo-500 hover:shadow-md disabled:opacity-60"
+                >
+                  {register.isPending ? 'Creating account...' : 'Create account'}
+                </button>
+              </form>
+            )}
+          </div>
         </div>
       </div>
     </div>

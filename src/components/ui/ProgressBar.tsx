@@ -36,7 +36,10 @@ export function ProgressBar({
       className={cn('h-2 w-full overflow-hidden rounded-full bg-slate-100', className)}
     >
       <div
-        className={cn('h-full rounded-full transition-all duration-300', BAR_TONES[tone])}
+        className={cn(
+          'motion-progress-fill h-full rounded-full transition-all duration-300',
+          BAR_TONES[tone],
+        )}
         style={{ width: `${Math.min(percent, 100)}%` }}
       />
     </div>

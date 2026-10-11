@@ -1,8 +1,15 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 
-import { attendancePercent, percentToRisk, type AttendanceRisk } from '@/lib/attendance'
-import { fetchAttendanceRecords, fetchSubjects } from '@/lib/dataApi'
+import {
+  attendancePercent,
+  percentToRisk,
+  type AttendanceRisk,
+} from '@/lib/attendance'
+import {
+  fetchAttendanceRecords,
+  fetchSubjects,
+} from '@/lib/dataApi'
 import type { Subject } from '@/types'
 
 export interface SubjectStats extends Subject {
@@ -38,16 +45,36 @@ export function useAttendance(email: string | undefined) {
 
   const summary = useMemo<AttendanceSummary | undefined>(() => {
     const subjects = subjectsQuery.data
+
     if (!subjects) return undefined
 
     const stats: SubjectStats[] = subjects.map((subject) => {
-      const percent = attendancePercent(subject.attended, subject.held)
-      return { ...subject, percent, risk: percentToRisk(percent) }
+      const percent = attendancePercent(
+        subject.attended,
+        subject.held,
+      )
+
+      return {
+        ...subject,
+        percent,
+        risk: percentToRisk(percent),
+      }
     })
 
-    const totalHeld = stats.reduce((sum, s) => sum + s.held, 0)
-    const totalAttended = stats.reduce((sum, s) => sum + s.attended, 0)
-    const overallPercent = attendancePercent(totalAttended, totalHeld)
+    const totalHeld = stats.reduce(
+      (sum, subject) => sum + subject.held,
+      0,
+    )
+
+    const totalAttended = stats.reduce(
+      (sum, subject) => sum + subject.attended,
+      0,
+    )
+
+    const overallPercent = attendancePercent(
+      totalAttended,
+      totalHeld,
+    )
 
     return {
       overallPercent,
@@ -55,9 +82,15 @@ export function useAttendance(email: string | undefined) {
       totalHeld,
       totalAttended,
       subjects: stats,
-      atRiskCount: stats.filter((s) => s.risk !== 'safe').length,
-      bySubjectId: new Map(stats.map((s) => [s.id, s])),
-      bySubjectName: new Map(stats.map((s) => [s.name, s])),
+      atRiskCount: stats.filter(
+        (subject) => subject.risk !== 'safe',
+      ).length,
+      bySubjectId: new Map(
+        stats.map((subject) => [subject.id, subject]),
+      ),
+      bySubjectName: new Map(
+        stats.map((subject) => [subject.name, subject]),
+      ),
       hasData: stats.length > 0,
     }
   }, [subjectsQuery.data])
@@ -65,7 +98,9 @@ export function useAttendance(email: string | undefined) {
   return {
     summary,
     records: recordsQuery.data ?? [],
-    isLoading: subjectsQuery.isLoading || recordsQuery.isLoading,
-    isError: subjectsQuery.isError || recordsQuery.isError,
+    isLoading:
+      subjectsQuery.isLoading || recordsQuery.isLoading,
+    isError:
+      subjectsQuery.isError || recordsQuery.isError,
   }
 }
