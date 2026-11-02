@@ -32,6 +32,7 @@ export function AttendanceLogger({ email }: { email: string }) {
   const [subjectId, setSubjectId] = useState<string>('')
   const [status, setStatus] = useState<AttendanceStatus>('present')
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [error, setError] = useState<string | null>(null)
 
   const selected = subjectId || summary?.subjects[0]?.id || ''
 
@@ -103,7 +104,14 @@ export function AttendanceLogger({ email }: { email: string }) {
             type="submit"
             onClick={() => {
               if (!selected) return
-              void logClass.mutateAsync({ subjectId: selected, status, date })
+              setError(null)
+              void logClass
+                .mutateAsync({ subjectId: selected, status, date })
+                .catch((caught: unknown) =>
+                  setError(
+                    caught instanceof Error ? caught.message : 'Could not log this class.',
+                  ),
+                )
             }}
             disabled={logClass.isPending}
             className="w-full rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-slate-700 disabled:opacity-60"
@@ -112,6 +120,12 @@ export function AttendanceLogger({ email }: { email: string }) {
           </button>
         </div>
       </div>
+
+      {error && (
+        <p role="alert" className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600">
+          {error}
+        </p>
+      )}
 
       <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {summary.subjects.map((subject) => (

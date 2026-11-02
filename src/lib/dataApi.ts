@@ -1,6 +1,23 @@
 import { rescheduleMissedWork } from '@/features/planner/plannerEngine'
 import { reminderOf } from '@/features/tasks/taskMeta'
+import {
+  createSharedSubject,
+  deleteSharedSubject,
+  fetchSharedRecords,
+  fetchSharedStaffSubjects,
+  fetchSharedSubjects,
+  fetchStaffAttendanceRows,
+  importSharedAttendance,
+  logSharedAttendance,
+  setSharedSubjectCounters,
+  syncStaffSubjects,
+  updateSharedIdentity,
+  updateSharedSubject,
+  type SharedIdentity,
+  type StaffAttendanceSharedRow,
+} from '@/lib/attendanceSync'
 import { isoToday, makeId } from '@/lib/date'
+import { isAttendanceSyncConfigured } from '@/lib/supabase'
 import { subjectKey } from '@/lib/subjectKey'
 import {
   dataKey,
@@ -156,7 +173,27 @@ export async function saveStudentProfile(
       ),
     )
   }
+
+  // Keep the shared roster's name/roll/course in sync. This is best-effort:
+  // a network hiccup must not block editing the local profile.
+  if (isAttendanceSyncConfigured) {
+    try {
+      await updateSharedIdentity(email, identityFromProfile(profile))
+    } catch {
+      // The next profile save or roster fetch retries.
+    }
+  }
+
   return profile
+}
+
+function identityFromProfile(profile: StudentProfile): SharedIdentity {
+  return {
+    studentName: profile.fullName.trim(),
+    studentId: profile.studentId.trim(),
+    studentCourse: profile.course.trim(),
+    studentYear: profile.year.trim(),
+  }
 }
 
 /* ================================================================== *
@@ -168,7 +205,57 @@ function readSubjects(email: string): Subject[] {
   return isArrayOfObjects<Subject>(value) ? value : []
 }
 
+function writeSubjects(email: string, subjects: Subject[]): void {
+  writeStore(dataKey(email, 'subjects'), subjects)
+}
+
+/**
+ * Uploads this device's existing localStorage attendance exactly once.
+ *
+ * Reads are shared once Supabase is configured, but an existing account may
+ * have subjects/records only on this device. The RPC ignores the call when the
+ * student already has shared subjects, so a stale cache can never overwrite
+ * live/manual counters. A rejected call is retried on the next read.
+ */
+const sharedImportCache = new Map<string, Promise<void>>()
+
+export async function ensureSharedAttendanceReady(email: string): Promise<void> {
+  if (!isAttendanceSyncConfigured || !email) return
+
+  const key = email.toLowerCase()
+  const cached = sharedImportCache.get(key)
+  if (cached) return cached
+
+  const pending = (async () => {
+    const subjects = readSubjects(email)
+    if (subjects.length === 0) return
+    const profile = await fetchStudentProfile(email)
+    await importSharedAttendance({
+      studentEmail: email,
+      identity: identityFromProfile(profile),
+      subjects,
+      records: readRecords(email),
+    })
+  })()
+
+  sharedImportCache.set(key, pending)
+  try {
+    await pending
+  } catch (error) {
+    sharedImportCache.delete(key)
+    throw error
+  }
+}
+
 export async function fetchSubjects(email: string): Promise<Subject[]> {
+  if (isAttendanceSyncConfigured) {
+    try {
+      await ensureSharedAttendanceReady(email)
+      return await fetchSharedSubjects(email)
+    } catch {
+      // Offline or schema not applied yet — keep the local cache usable.
+    }
+  }
   return readSubjects(email)
 }
 
@@ -186,7 +273,26 @@ export async function createSubject(
     held: 0,
     attended: 0,
   }
-  writeStore(dataKey(email, 'subjects'), [subject, ...readSubjects(email)])
+
+  if (isAttendanceSyncConfigured) {
+    await ensureSharedAttendanceReady(email)
+    const profile = await fetchStudentProfile(email)
+    const saved = await createSharedSubject({
+      studentEmail: email,
+      subject,
+      identity: identityFromProfile(profile),
+    })
+    const savedKey = subjectKey(saved.name, saved.code)
+    writeSubjects(email, [
+      saved,
+      ...readSubjects(email).filter(
+        (item) => item.id !== saved.id && subjectKey(item.name, item.code) !== savedKey,
+      ),
+    ])
+    return saved
+  }
+
+  writeSubjects(email, [subject, ...readSubjects(email)])
   return subject
 }
 
@@ -194,16 +300,33 @@ export async function updateSubject(
   email: string,
   subject: Subject,
 ): Promise<Subject> {
-  writeStore(
-    dataKey(email, 'subjects'),
+  if (isAttendanceSyncConfigured) {
+    await ensureSharedAttendanceReady(email)
+    const saved = await updateSharedSubject(email, subject)
+    writeSubjects(
+      email,
+      readSubjects(email).map((item) =>
+        item.id === subject.id || item.id === saved.id ? saved : item,
+      ),
+    )
+    return saved
+  }
+
+  writeSubjects(
+    email,
     readSubjects(email).map((item) => (item.id === subject.id ? subject : item)),
   )
   return subject
 }
 
 export async function deleteSubject(email: string, subjectId: string): Promise<void> {
-  writeStore(
-    dataKey(email, 'subjects'),
+  if (isAttendanceSyncConfigured) {
+    await ensureSharedAttendanceReady(email)
+    await deleteSharedSubject(email, subjectId)
+  }
+
+  writeSubjects(
+    email,
     readSubjects(email).filter((item) => item.id !== subjectId),
   )
   writeStore(
@@ -226,6 +349,15 @@ function readRecords(email: string): AttendanceRecord[] {
 export async function fetchAttendanceRecords(
   email: string,
 ): Promise<AttendanceRecord[]> {
+  if (isAttendanceSyncConfigured) {
+    try {
+      await ensureSharedAttendanceReady(email)
+      const records = await fetchSharedRecords(email)
+      return records.sort((a, b) => b.date.localeCompare(a.date))
+    } catch {
+      // Offline or schema not applied yet — keep the local cache usable.
+    }
+  }
   return readRecords(email).sort((a, b) => b.date.localeCompare(a.date))
 }
 
@@ -236,7 +368,30 @@ export async function logAttendance(
   status: AttendanceStatus,
   date: string,
 ): Promise<Subject | null> {
-  const record: AttendanceRecord = { id: makeId('att'), subjectId, date, status }
+  const recordId = makeId('att')
+
+  if (isAttendanceSyncConfigured) {
+    await ensureSharedAttendanceReady(email)
+    const subject = await logSharedAttendance({
+      studentEmail: email,
+      subjectId,
+      status,
+      date,
+      recordId,
+    })
+    const record: AttendanceRecord = { id: recordId, subjectId: subject.id, date, status }
+    writeStore(dataKey(email, 'attendance.records'), [
+      record,
+      ...readRecords(email).filter((item) => item.id !== recordId),
+    ])
+    writeSubjects(
+      email,
+      readSubjects(email).map((item) => (item.id === subject.id ? subject : item)),
+    )
+    return subject
+  }
+
+  const record: AttendanceRecord = { id: recordId, subjectId, date, status }
   writeStore(dataKey(email, 'attendance.records'), [record, ...readRecords(email)])
 
   const subjects = readSubjects(email)
@@ -249,26 +404,38 @@ export async function logAttendance(
     held: target.held + (counts ? 1 : 0),
     attended: target.attended + (status === 'present' || status === 'late' ? 1 : 0),
   }
-  writeStore(
-    dataKey(email, 'subjects'),
+  writeSubjects(
+    email,
     subjects.map((item) => (item.id === subjectId ? updated : item)),
   )
   return updated
 }
 
-/** Lets staff correct a student's counters — student sees it on next read. */
+/** Lets staff correct a student's counters — the student sees it on next read. */
 export async function setSubjectCounters(
   studentEmail: string,
   subjectId: string,
   held: number,
   attended: number,
 ): Promise<Subject | null> {
+  if (isAttendanceSyncConfigured) {
+    await ensureSharedAttendanceReady(studentEmail)
+    const saved = await setSharedSubjectCounters(studentEmail, subjectId, held, attended)
+    writeSubjects(
+      studentEmail,
+      readSubjects(studentEmail).map((item) =>
+        item.id === subjectId || item.id === saved.id ? saved : item,
+      ),
+    )
+    return saved
+  }
+
   const subjects = readSubjects(studentEmail)
   const target = subjects.find((item) => item.id === subjectId)
   if (!target) return null
   const updated: Subject = { ...target, held, attended }
-  writeStore(
-    dataKey(studentEmail, 'subjects'),
+  writeSubjects(
+    studentEmail,
     subjects.map((item) => (item.id === subjectId ? updated : item)),
   )
   return updated
@@ -416,7 +583,7 @@ export async function deleteProductivityGoal(email: string, goalId: string): Pro
  * ================================================================== */
 
 export async function fetchStaffProfile(email: string): Promise<StaffProfile> {
-  return readStore<StaffProfile>(dataKey(email, 'staffProfile'), {
+  const local = readStore<StaffProfile>(dataKey(email, 'staffProfile'), {
     fullName: '',
     email,
     staffId: '',
@@ -425,6 +592,24 @@ export async function fetchStaffProfile(email: string): Promise<StaffProfile> {
     academicYear: '',
     subjects: [],
   })
+
+  // A staff account that is new to this device has no local subjects. Pull the
+  // shared list instead of letting the next sync delete the server-side roster
+  // scope. A non-empty local profile always wins (it is the newer edit).
+  if (isAttendanceSyncConfigured && email && local.subjects.length === 0) {
+    try {
+      const shared = await fetchSharedStaffSubjects(email)
+      if (shared.length > 0) {
+        const hydrated: StaffProfile = { ...local, subjects: shared }
+        writeStore(dataKey(email, 'staffProfile'), hydrated)
+        return hydrated
+      }
+    } catch {
+      // Offline / schema not applied yet — keep the local profile.
+    }
+  }
+
+  return local
 }
 
 export async function saveStaffProfile(
@@ -432,6 +617,17 @@ export async function saveStaffProfile(
   profile: StaffProfile,
 ): Promise<StaffProfile> {
   writeStore(dataKey(email, 'staffProfile'), profile)
+
+  // Mirror taught subjects to the shared database so the roster query can be
+  // scoped server-side. Best-effort: the roster fetch retries this.
+  if (isAttendanceSyncConfigured) {
+    try {
+      await syncStaffSubjects(email, profile.subjects)
+    } catch {
+      // Retried by fetchStaffRoster.
+    }
+  }
+
   return profile
 }
 
@@ -499,11 +695,103 @@ export interface StaffSubjectAnalytics {
   atRiskCount: number
 }
 
-/**
- * Builds the staff roster by reading the academic data of every enrolled
- * student — the same subject + attendance records students see themselves.
- */
-export async function fetchStaffRoster(email: string): Promise<{
+interface SubjectBucket {
+  key: string
+  nameKey: string
+  name: string
+  code: string
+  semester: string
+  percents: number[]
+  atRisk: number
+}
+
+function percentOf(held: number, attended: number): number {
+  return held > 0 ? Math.round((attended / held) * 100) : 0
+}
+
+/** Starts one bucket per taught subject so 0-student subjects still display. */
+function emptySubjectBuckets(profile: StaffProfile): Map<string, SubjectBucket> {
+  const buckets = new Map<string, SubjectBucket>()
+  for (const taught of profile.subjects) {
+    const key = subjectKey(taught.name, taught.code)
+    buckets.set(key, {
+      key,
+      nameKey: subjectKey(taught.name),
+      name: taught.name,
+      code: taught.code,
+      semester: taught.semester,
+      percents: [],
+      atRisk: 0,
+    })
+  }
+  return buckets
+}
+
+function bucketsToSubjects(
+  buckets: Map<string, SubjectBucket>,
+): StaffSubjectAnalytics[] {
+  return [...buckets.entries()].map(([key, bucket]) => ({
+    key,
+    name: bucket.name,
+    code: bucket.code,
+    semester: bucket.semester,
+    studentCount: bucket.percents.length,
+    averagePercent:
+      bucket.percents.length > 0
+        ? Math.round(
+            bucket.percents.reduce((sum, p) => sum + p, 0) / bucket.percents.length,
+          )
+        : 0,
+    atRiskCount: bucket.atRisk,
+  }))
+}
+
+function rosterFromSharedRows(
+  profile: StaffProfile,
+  sharedRows: StaffAttendanceSharedRow[],
+): {
+  profile: StaffProfile
+  subjects: StaffSubjectAnalytics[]
+  rows: StudentAttendanceRow[]
+} {
+  const buckets = emptySubjectBuckets(profile)
+  const byNameKey = new Map<string, SubjectBucket>()
+  for (const bucket of buckets.values()) {
+    if (!byNameKey.has(bucket.nameKey)) byNameKey.set(bucket.nameKey, bucket)
+  }
+
+  const rows: StudentAttendanceRow[] = []
+
+  for (const row of sharedRows) {
+    const fullKey = row.subjectKey || subjectKey(row.subjectName, row.subjectCode)
+    const bucket =
+      buckets.get(fullKey) ?? byNameKey.get(subjectKey(row.subjectName))
+    if (!bucket) continue // student is not in one of my subjects
+
+    const percent = percentOf(row.held, row.attended)
+    bucket.percents.push(percent)
+    if (percent < 75) bucket.atRisk += 1
+
+    rows.push({
+      studentEmail: row.studentEmail,
+      studentName: row.studentName || row.studentEmail,
+      studentId: row.studentId || '-',
+      department: row.studentCourse || '-',
+      year: row.studentYear || '-',
+      subjectId: row.subjectId,
+      subjectName: row.subjectName,
+      subjectCode: row.subjectCode,
+      attended: row.attended,
+      held: row.held,
+      percent,
+    })
+  }
+
+  return { profile, subjects: bucketsToSubjects(buckets), rows }
+}
+
+/** Legacy path: this device's localStorage (used when the backend is absent). */
+async function rosterFromLocal(email: string): Promise<{
   profile: StaffProfile
   subjects: StaffSubjectAnalytics[]
   rows: StudentAttendanceRow[]
@@ -512,31 +800,16 @@ export async function fetchStaffRoster(email: string): Promise<{
   const students = readUsers().filter((user) => user.role === 'student')
 
   const rows: StudentAttendanceRow[] = []
-  const subjectBuckets = new Map<
-    string,
-    { name: string; code: string; semester: string; percents: number[]; atRisk: number }
-  >()
-
-  for (const taught of profile.subjects) {
-    const key = subjectKey(taught.name, taught.code)
-    subjectBuckets.set(key, {
-      name: taught.name,
-      code: taught.code,
-      semester: taught.semester,
-      percents: [],
-      atRisk: 0,
-    })
-  }
+  const buckets = emptySubjectBuckets(profile)
 
   for (const student of students) {
     const studentProfile = await fetchStudentProfile(student.email)
     for (const subject of readSubjects(student.email)) {
       const key = subjectKey(subject.name, subject.code)
-      const bucket = subjectBuckets.get(key)
+      const bucket = buckets.get(key)
       if (!bucket) continue // student not in one of my subjects
 
-      const percent =
-        subject.held > 0 ? Math.round((subject.attended / subject.held) * 100) : 0
+      const percent = percentOf(subject.held, subject.attended)
       bucket.percents.push(percent)
       if (percent < 75) bucket.atRisk += 1
 
@@ -556,24 +829,33 @@ export async function fetchStaffRoster(email: string): Promise<{
     }
   }
 
-  const subjects: StaffSubjectAnalytics[] = [...subjectBuckets.entries()].map(
-    ([key, bucket]) => ({
-      key,
-      name: bucket.name,
-      code: bucket.code,
-      semester: bucket.semester,
-      studentCount: bucket.percents.length,
-      averagePercent:
-        bucket.percents.length > 0
-          ? Math.round(
-              bucket.percents.reduce((sum, p) => sum + p, 0) / bucket.percents.length,
-            )
-          : 0,
-      atRiskCount: bucket.atRisk,
-    }),
-  )
+  return { profile, subjects: bucketsToSubjects(buckets), rows }
+}
 
-  return { profile, subjects, rows }
+/**
+ * Builds the staff roster from the SAME shared attendance model students use:
+ * a row exists only when a student is actually enrolled in a taught subject.
+ * A live check-in increments that enrollment's counters; it never enrolls.
+ */
+export async function fetchStaffRoster(email: string): Promise<{
+  profile: StaffProfile
+  subjects: StaffSubjectAnalytics[]
+  rows: StudentAttendanceRow[]
+}> {
+  const profile = await fetchStaffProfile(email)
+
+  if (isAttendanceSyncConfigured) {
+    try {
+      // Scope the server-side roster query to what this staff member teaches.
+      await syncStaffSubjects(email, profile.subjects)
+      const sharedRows = await fetchStaffAttendanceRows(email)
+      return rosterFromSharedRows(profile, sharedRows)
+    } catch {
+      // Offline / schema not applied yet — fall back to this device's cache.
+    }
+  }
+
+  return rosterFromLocal(email)
 }
 
 export type { UserRole, TaskPriority }

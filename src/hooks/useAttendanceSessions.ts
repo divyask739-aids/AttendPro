@@ -12,6 +12,7 @@ import {
   type CreateAttendanceSessionInput,
 } from '@/lib/attendanceSync'
 import { isAttendanceSyncConfigured, supabase } from '@/lib/supabase'
+import { ensureSharedAttendanceReady } from '@/lib/dataApi'
 import type { AttendanceCheckIn, AttendanceSession } from '@/types'
 
 const SESSION_KEY = 'attendance-sessions'
@@ -89,6 +90,10 @@ export function useAttendanceCheckInBroadcast(sessionId: string | null | undefin
           queryKey: [CHECKIN_KEY, sessionId],
         })
         void queryClient.invalidateQueries({ queryKey: [SESSION_KEY] })
+        // The check-in also wrote the shared attendance model.
+        void queryClient.invalidateQueries({ queryKey: ['subjects'] })
+        void queryClient.invalidateQueries({ queryKey: ['attendance-records'] })
+        void queryClient.invalidateQueries({ queryKey: ['staff-roster'] })
       })
       .subscribe()
 
@@ -135,6 +140,15 @@ export function useCheckInMutation() {
 
   return useMutation({
     mutationFn: async (input: CheckInInput) => {
+      // Make sure this device's existing subjects are uploaded first, so the
+      // database can see the enrollment the check-in is validated against.
+      // Best-effort: a failed upload must not block an otherwise valid check-in
+      // (the student may already be enrolled from another device).
+      try {
+        await ensureSharedAttendanceReady(input.studentEmail)
+      } catch {
+        // The check-in RPC below is authoritative.
+      }
       const session = await findSessionByCode(input.code)
       if (!session) {
         throw new Error('Invalid attendance code. Ask your faculty for the current code.')
@@ -150,6 +164,11 @@ export function useCheckInMutation() {
         queryKey: [CHECKIN_KEY, checkIn.sessionId],
       })
       void queryClient.invalidateQueries({ queryKey: [SESSION_KEY] })
+      // Refresh the student's own Attendance page/Dashboard and the staff
+      // roster immediately; polling covers other devices.
+      void queryClient.invalidateQueries({ queryKey: ['subjects'] })
+      void queryClient.invalidateQueries({ queryKey: ['attendance-records'] })
+      void queryClient.invalidateQueries({ queryKey: ['staff-roster'] })
     },
   })
 }

@@ -1,16 +1,43 @@
-import { useQuery } from '@tanstack/react-query'
+import { useEffect } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { fetchStaffRoster, fetchVisibleActivities } from '@/lib/dataApi'
 import { useAttendance } from '@/hooks/useAttendance'
+import { supabase } from '@/lib/supabase'
 import type { UserRole } from '@/types'
 
 /** Staff analytics computed from the same student subject/attendance records. */
 export function useStaffRoster(email: string | undefined) {
+  const queryClient = useQueryClient()
   const query = useQuery({
     queryKey: ['staff-roster', email],
     queryFn: () => fetchStaffRoster(email ?? ''),
     enabled: Boolean(email),
+    staleTime: 5_000,
+    // A student check-in writes shared counters; keep the roster fresh even
+    // when Realtime is unavailable.
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: true,
   })
+
+  // The database trigger publishes every check-in on `attendance-updates`.
+  useEffect(() => {
+    const client = supabase
+    if (!client) return
+
+    const channel = client
+      .channel('attendance-updates')
+      .on('broadcast', { event: 'check_in' }, () => {
+        void queryClient.invalidateQueries({ queryKey: ['staff-roster'] })
+        void queryClient.invalidateQueries({ queryKey: ['subjects'] })
+        void queryClient.invalidateQueries({ queryKey: ['attendance-records'] })
+      })
+      .subscribe()
+
+    return () => {
+      void client.removeChannel(channel)
+    }
+  }, [queryClient])
 
   return {
     profile: query.data?.profile,

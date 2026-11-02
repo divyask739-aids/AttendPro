@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 
@@ -25,6 +25,7 @@ export function StaffDashboardPage({ email }: { email: string }) {
     rows.length > 0
       ? Math.round(rows.reduce((sum, row) => sum + row.percent, 0) / rows.length)
       : 0
+  const enrolledStudents = new Set(rows.map((row) => row.studentEmail)).size
   const atRisk = rows.filter((row) => percentToRisk(row.percent) === 'high').length
 
   return (
@@ -55,7 +56,7 @@ export function StaffDashboardPage({ email }: { email: string }) {
         <>
           <div className="mt-5 grid gap-3 sm:grid-cols-3">
             <Metric label="Subjects taught" value={String(subjects.length)} />
-            <Metric label="Students enrolled" value={String(rows.length)} />
+            <Metric label="Students enrolled" value={String(enrolledStudents)} />
             <Metric label="Average attendance" value={`${overall}%`} />
           </div>
 
@@ -325,7 +326,7 @@ export function StaffAttendancePage({ email }: { email: string }) {
               key={`${row.studentEmail}-${row.subjectId}`}
               row={row}
               onSave={(held, attended) =>
-                counter.mutateAsync({
+                counter.mutate({
                   studentEmail: row.studentEmail,
                   subjectId: row.subjectId,
                   held,
@@ -336,6 +337,15 @@ export function StaffAttendancePage({ email }: { email: string }) {
           ))
         )}
       </div>
+
+      {counter.isError && (
+        <p role="alert" className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600">
+          {counter.error instanceof Error
+            ? counter.error.message
+            : 'Could not update attendance.'}
+        </p>
+      )}
+
       <p className="mt-4 text-[11px] text-slate-400">
         Showing {byStudent.size} student{byStudent.size === 1 ? '' : 's'}.
       </p>
@@ -360,6 +370,17 @@ function CounterRow({
 }) {
   const [held, setHeld] = useState(row.held)
   const [attended, setAttended] = useState(row.attended)
+  const [dirty, setDirty] = useState(false)
+
+  // Live check-ins update the shared counters underneath this row. Follow the
+  // server while the staff member is not editing, so a stale form can never
+  // overwrite a check-in on save.
+  useEffect(() => {
+    if (dirty) return
+    setHeld(row.held)
+    setAttended(row.attended)
+  }, [row.held, row.attended, dirty])
+
   const percent = held > 0 ? Math.round((attended / held) * 100) : 0
 
   return (
@@ -379,7 +400,10 @@ function CounterRow({
             type="number"
             min={0}
             value={held}
-            onChange={(e) => setHeld(Math.max(0, Number(e.target.value)))}
+            onChange={(e) => {
+              setHeld(Math.max(0, Number(e.target.value)))
+              setDirty(true)
+            }}
             className="mt-1 w-20 rounded-xl border border-slate-200 px-2 py-1.5 text-sm"
           />
         </label>
@@ -389,14 +413,20 @@ function CounterRow({
             type="number"
             min={0}
             value={attended}
-            onChange={(e) => setAttended(Math.max(0, Number(e.target.value)))}
+            onChange={(e) => {
+              setAttended(Math.max(0, Number(e.target.value)))
+              setDirty(true)
+            }}
             className="mt-1 w-20 rounded-xl border border-slate-200 px-2 py-1.5 text-sm"
           />
         </label>
         <span className="text-sm font-bold text-slate-700">{percent}%</span>
         <button
           type="button"
-          onClick={() => onSave(held, attended)}
+          onClick={() => {
+            setDirty(false)
+            onSave(held, attended)
+          }}
           className="rounded-xl bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white"
         >
           Save

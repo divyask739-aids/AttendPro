@@ -27,12 +27,18 @@ export function SubjectManager({ email }: { email: string }) {
   const { addSubject } = useSubjectMutations(email)
   const [draft, setDraft] = useState(emptyDraft())
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   const onCreate = async (event: React.FormEvent) => {
     event.preventDefault()
     if (!draft.name.trim()) return
-    await addSubject.mutateAsync(draft)
-    setDraft(emptyDraft())
+    setError(null)
+    try {
+      await addSubject.mutateAsync(draft)
+      setDraft(emptyDraft())
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not add the subject.')
+    }
   }
 
   return (
@@ -89,6 +95,12 @@ export function SubjectManager({ email }: { email: string }) {
         </div>
       </form>
 
+      {error && (
+        <p role="alert" className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600">
+          {error}
+        </p>
+      )}
+
       {isLoading ? (
         <p className="mt-5 text-sm text-slate-500">Loading subjects...</p>
       ) : !summary || summary.subjects.length === 0 ? (
@@ -130,6 +142,16 @@ function SubjectRow({
 }) {
   const { editSubject, removeSubject } = useSubjectMutations(email)
   const needed = classesNeededToReach(subject.attended, subject.held)
+  const [error, setError] = useState<string | null>(null)
+
+  const run = async (action: () => Promise<unknown>) => {
+    setError(null)
+    try {
+      await action()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not save changes.')
+    }
+  }
 
   return (
     <li className="rounded-2xl border border-slate-200 bg-white p-4">
@@ -138,8 +160,10 @@ function SubjectRow({
           subject={subject}
           onCancel={onCancelEdit}
           onSave={async (patch) => {
-            await editSubject.mutateAsync({ ...subject, ...patch })
-            onCancelEdit()
+            await run(async () => {
+              await editSubject.mutateAsync({ ...subject, ...patch })
+              onCancelEdit()
+            })
           }}
         />
       ) : (
@@ -184,7 +208,7 @@ function SubjectRow({
               </button>
               <button
                 type="button"
-                onClick={() => void removeSubject.mutateAsync(subject.id)}
+                onClick={() => void run(() => removeSubject.mutateAsync(subject.id))}
                 className="rounded-lg px-2.5 py-1 text-xs font-semibold text-rose-600 hover:bg-rose-50"
               >
                 Delete
@@ -192,6 +216,12 @@ function SubjectRow({
             </div>
           </div>
         </>
+      )}
+
+      {error && (
+        <p role="alert" className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600">
+          {error}
+        </p>
       )}
     </li>
   )

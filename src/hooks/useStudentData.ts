@@ -110,6 +110,8 @@ export function useProfileMutations(email: string | undefined) {
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ['profile', email] })
     void queryClient.invalidateQueries({ queryKey: ['staff-profile', email] })
+    // Identity + taught subjects feed the shared staff roster.
+    void queryClient.invalidateQueries({ queryKey: ['staff-roster'] })
     void queryClient.invalidateQueries({ queryKey: ['session'] })
   }
 

@@ -10,7 +10,9 @@ import {
   fetchAttendanceRecords,
   fetchSubjects,
 } from '@/lib/dataApi'
-import type { Subject } from '@/types'
+import type { AttendanceRecord, Subject } from '@/types'
+
+const EMPTY_RECORDS: AttendanceRecord[] = []
 
 export interface SubjectStats extends Subject {
   percent: number
@@ -35,12 +37,19 @@ export function useAttendance(email: string | undefined) {
     queryKey: ['subjects', email],
     queryFn: () => fetchSubjects(email ?? ''),
     enabled: Boolean(email),
+    staleTime: 5_000,
+    // Live check-ins update the shared counters from another device.
+    refetchInterval: 20_000,
+    refetchOnWindowFocus: true,
   })
 
   const recordsQuery = useQuery({
     queryKey: ['attendance-records', email],
     queryFn: () => fetchAttendanceRecords(email ?? ''),
     enabled: Boolean(email),
+    staleTime: 5_000,
+    refetchInterval: 20_000,
+    refetchOnWindowFocus: true,
   })
 
   const summary = useMemo<AttendanceSummary | undefined>(() => {
@@ -97,7 +106,7 @@ export function useAttendance(email: string | undefined) {
 
   return {
     summary,
-    records: recordsQuery.data ?? [],
+    records: recordsQuery.data ?? EMPTY_RECORDS,
     isLoading:
       subjectsQuery.isLoading || recordsQuery.isLoading,
     isError:

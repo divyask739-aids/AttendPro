@@ -53,12 +53,114 @@ create table if not exists public.attendance_checkins (
 create index if not exists attendance_checkins_session_idx
   on public.attendance_checkins (session_id, checked_in_at asc);
 
+-- -------------------------------------------------------------------
+-- Shared attendance (the existing Subject + AttendanceRecord model)
+--
+-- attendance_subjects is the canonical enrollment list: one row per
+-- student + subject. A check-in NEVER creates a row here; it only links
+-- to an existing enrollment. That keeps "students enrolled" honest.
+-- -------------------------------------------------------------------
+
+create table if not exists public.attendance_subjects (
+  id              text primary key,
+  student_email   text not null,
+  student_name    text not null default '',
+  student_id      text not null default '',
+  student_course  text not null default '',
+  student_year    text not null default '',
+  name            text not null,
+  code            text not null default '',
+  faculty         text not null default '',
+  subject_key     text not null,
+  name_key        text not null,
+  held            integer not null default 0 check (held >= 0),
+  attended        integer not null default 0 check (attended >= 0),
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now(),
+  constraint attendance_subjects_enrollment_unique unique (student_email, subject_key)
+);
+
+create index if not exists attendance_subjects_lookup_idx
+  on public.attendance_subjects (name_key, student_email);
+
+create index if not exists attendance_subjects_student_idx
+  on public.attendance_subjects (lower(student_email));
+
+create table if not exists public.attendance_records (
+  id            text primary key,
+  student_email text not null,
+  subject_id    text not null references public.attendance_subjects (id) on delete cascade,
+  subject_key   text not null,
+  date          date not null,
+  status        text not null check (status in ('present', 'absent', 'late', 'cancelled')),
+  source        text not null default 'manual' check (source in ('manual', 'live')),
+  session_id    uuid references public.attendance_sessions (id) on delete set null,
+  created_at    timestamptz not null default now()
+);
+
+create index if not exists attendance_records_student_idx
+  on public.attendance_records (lower(student_email), date desc);
+
+create index if not exists attendance_records_subject_idx
+  on public.attendance_records (subject_id, date desc);
+
+-- A student can only ever have one attendance row for a live session.
+create unique index if not exists attendance_records_session_student_unique
+  on public.attendance_records (session_id, student_email)
+  where session_id is not null;
+
+-- Staff profile subjects, mirrored so the roster can be scoped by what a
+-- staff member actually teaches instead of trusting client-side filters.
+create table if not exists public.attendance_staff_subjects (
+  id            uuid primary key default gen_random_uuid(),
+  staff_email   text not null,
+  name          text not null,
+  code          text not null default '',
+  semester      text not null default '',
+  subject_key   text not null,
+  name_key      text not null,
+  created_at    timestamptz not null default now(),
+  constraint attendance_staff_subjects_unique unique (staff_email, subject_key)
+);
+
+create index if not exists attendance_staff_subjects_email_idx
+  on public.attendance_staff_subjects (lower(staff_email));
+
 -- Lock the tables down. Only the functions below may touch them.
 alter table public.attendance_sessions enable row level security;
 alter table public.attendance_checkins enable row level security;
+alter table public.attendance_subjects enable row level security;
+alter table public.attendance_records enable row level security;
+alter table public.attendance_staff_subjects enable row level security;
 
 revoke all on public.attendance_sessions from anon, authenticated;
 revoke all on public.attendance_checkins from anon, authenticated;
+revoke all on public.attendance_subjects from anon, authenticated;
+revoke all on public.attendance_records from anon, authenticated;
+revoke all on public.attendance_staff_subjects from anon, authenticated;
+
+-- -------------------------------------------------------------------
+-- Subject identity helpers (same normalization as src/lib/subjectKey.ts)
+-- -------------------------------------------------------------------
+
+create or replace function public.normalize_subject(p_value text)
+returns text
+language sql
+immutable
+as $$
+  select lower(regexp_replace(coalesce(p_value, ''), '[^a-zA-Z0-9]+', '', 'g'));
+$$;
+
+create or replace function public.attendance_subject_key(p_name text, p_code text)
+returns text
+language sql
+immutable
+as $$
+  select case
+    when public.normalize_subject(p_code) = '' then public.normalize_subject(p_name)
+    else public.normalize_subject(p_code) || ':' || public.normalize_subject(p_name)
+  end;
+$$;
 
 -- -------------------------------------------------------------------
 -- Code generation
@@ -251,6 +353,452 @@ end;
 $$;
 
 -- -------------------------------------------------------------------
+-- Staff: mirror taught subjects, then read scoped attendance
+-- -------------------------------------------------------------------
+
+create or replace function public.sync_staff_attendance_subjects(
+  p_staff_email text,
+  p_subjects    jsonb
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email text := lower(trim(coalesce(p_staff_email, '')));
+begin
+  if v_email = '' then
+    raise exception 'Staff email is required.';
+  end if;
+
+  delete from public.attendance_staff_subjects
+  where lower(staff_email) = v_email;
+
+  insert into public.attendance_staff_subjects (
+    staff_email, name, code, semester, subject_key, name_key
+  )
+  select
+    v_email,
+    trim(x.name),
+    coalesce(trim(x.code), ''),
+    coalesce(trim(x.semester), ''),
+    public.attendance_subject_key(x.name, x.code),
+    public.normalize_subject(x.name)
+  from jsonb_to_recordset(coalesce(p_subjects, '[]'::jsonb))
+    as x(name text, code text, semester text)
+  where trim(coalesce(x.name, '')) <> ''
+  on conflict (staff_email, subject_key) do nothing;
+end;
+$$;
+
+-- Lets a staff member restore taught subjects on a new device. Without this a
+-- fresh browser has an empty local profile and would overwrite the shared list.
+drop function if exists public.get_staff_attendance_subjects(text);
+
+create or replace function public.get_staff_attendance_subjects(p_staff_email text)
+returns table (
+  name     text,
+  code     text,
+  semester text
+)
+language sql
+security definer
+set search_path = public
+as $$
+  select s.name, s.code, s.semester
+  from public.attendance_staff_subjects s
+  where lower(s.staff_email) = lower(trim(coalesce(p_staff_email, '')))
+  order by s.name asc;
+$$;
+
+drop function if exists public.get_staff_attendance(text);
+
+create or replace function public.get_staff_attendance(p_staff_email text)
+returns table (
+  student_email   text,
+  student_name    text,
+  student_id      text,
+  student_course  text,
+  student_year    text,
+  subject_id      text,
+  subject_name    text,
+  subject_code    text,
+  attended        integer,
+  held            integer,
+  subject_key     text,
+  updated_at      timestamptz
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  return query
+  select
+    s.student_email,
+    s.student_name,
+    s.student_id,
+    s.student_course,
+    s.student_year,
+    s.id,
+    s.name,
+    s.code,
+    s.attended,
+    s.held,
+    s.subject_key,
+    s.updated_at
+  from public.attendance_subjects s
+  where exists (
+    select 1
+    from public.attendance_staff_subjects t
+    where lower(t.staff_email) = lower(trim(p_staff_email))
+      and (
+        t.subject_key = s.subject_key
+        or t.name_key = s.name_key
+      )
+  )
+  order by s.student_name asc, s.name asc;
+end;
+$$;
+
+-- -------------------------------------------------------------------
+-- Student: shared subjects + attendance records (existing model)
+-- -------------------------------------------------------------------
+
+create or replace function public.import_student_attendance(
+  p_student_email  text,
+  p_student_name   text default '',
+  p_student_id     text default '',
+  p_student_course text default '',
+  p_student_year   text default '',
+  p_subjects       jsonb default '[]'::jsonb,
+  p_records        jsonb default '[]'::jsonb
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email   text := lower(trim(coalesce(p_student_email, '')));
+  v_exists  boolean;
+begin
+  if v_email = '' then
+    raise exception 'Student email is required.';
+  end if;
+
+  -- One-time migration from this device's localStorage. Once the student
+  -- has shared data, never overwrite live/manual counters from a stale cache.
+  select exists (
+    select 1 from public.attendance_subjects where lower(student_email) = v_email
+  ) into v_exists;
+  if v_exists then
+    return;
+  end if;
+
+  insert into public.attendance_subjects (
+    id, student_email, student_name, student_id, student_course, student_year,
+    name, code, faculty, subject_key, name_key, held, attended
+  )
+  select
+    x.id,
+    v_email,
+    coalesce(trim(p_student_name), ''),
+    coalesce(trim(p_student_id), ''),
+    coalesce(trim(p_student_course), ''),
+    coalesce(trim(p_student_year), ''),
+    trim(x.name),
+    coalesce(trim(x.code), ''),
+    coalesce(trim(x.faculty), ''),
+    public.attendance_subject_key(x.name, x.code),
+    public.normalize_subject(x.name),
+    greatest(coalesce(x.held, 0), 0),
+    least(greatest(coalesce(x.attended, 0), 0), greatest(coalesce(x.held, 0), 0))
+  from jsonb_to_recordset(coalesce(p_subjects, '[]'::jsonb))
+    as x(id text, name text, code text, faculty text, held integer, attended integer)
+  where coalesce(trim(x.id), '') <> ''
+    and trim(coalesce(x.name, '')) <> ''
+  on conflict (student_email, subject_key) do nothing;
+
+  insert into public.attendance_records (
+    id, student_email, subject_id, subject_key, date, status, source
+  )
+  select
+    x.id,
+    v_email,
+    x.subject_id,
+    s.subject_key,
+    x.record_date::date,
+    x.status,
+    'manual'
+  from jsonb_to_recordset(coalesce(p_records, '[]'::jsonb))
+    as x(id text, subject_id text, record_date text, status text)
+  join public.attendance_subjects s
+    on s.id = x.subject_id
+   and lower(s.student_email) = v_email
+  where coalesce(trim(x.id), '') <> ''
+    and coalesce(x.record_date, '') ~ '^\d{4}-\d{2}-\d{2}$'
+    and x.status in ('present', 'absent', 'late', 'cancelled')
+  on conflict (id) do nothing;
+end;
+$$;
+
+create or replace function public.update_attendance_identity(
+  p_student_email  text,
+  p_student_name   text default '',
+  p_student_id     text default '',
+  p_student_course text default '',
+  p_student_year   text default ''
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update public.attendance_subjects
+  set student_name = coalesce(trim(p_student_name), ''),
+      student_id = coalesce(trim(p_student_id), ''),
+      student_course = coalesce(trim(p_student_course), ''),
+      student_year = coalesce(trim(p_student_year), ''),
+      updated_at = now()
+  where lower(student_email) = lower(trim(p_student_email));
+end;
+$$;
+
+create or replace function public.create_attendance_subject(
+  p_student_email  text,
+  p_subject        jsonb,
+  p_student_name   text default '',
+  p_student_id     text default '',
+  p_student_course text default '',
+  p_student_year   text default ''
+)
+returns public.attendance_subjects
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_email   text := lower(trim(coalesce(p_student_email, '')));
+  v_subject public.attendance_subjects;
+begin
+  if v_email = '' then
+    raise exception 'Student email is required.';
+  end if;
+  if coalesce(trim(p_subject->>'id'), '') = ''
+     or coalesce(trim(p_subject->>'name'), '') = '' then
+    raise exception 'Subject id and name are required.';
+  end if;
+
+  insert into public.attendance_subjects (
+    id, student_email, student_name, student_id, student_course, student_year,
+    name, code, faculty, subject_key, name_key, held, attended
+  )
+  values (
+    p_subject->>'id',
+    v_email,
+    coalesce(trim(p_student_name), ''),
+    coalesce(trim(p_student_id), ''),
+    coalesce(trim(p_student_course), ''),
+    coalesce(trim(p_student_year), ''),
+    trim(p_subject->>'name'),
+    coalesce(trim(p_subject->>'code'), ''),
+    coalesce(trim(p_subject->>'faculty'), ''),
+    public.attendance_subject_key(p_subject->>'name', p_subject->>'code'),
+    public.normalize_subject(p_subject->>'name'),
+    0,
+    0
+  )
+  on conflict (student_email, subject_key) do update
+    set name = excluded.name,
+        code = excluded.code,
+        faculty = excluded.faculty,
+        student_name = excluded.student_name,
+        student_id = excluded.student_id,
+        student_course = excluded.student_course,
+        student_year = excluded.student_year,
+        updated_at = now()
+  returning * into v_subject;
+
+  return v_subject;
+end;
+$$;
+
+create or replace function public.update_attendance_subject(
+  p_student_email text,
+  p_subject       jsonb
+)
+returns public.attendance_subjects
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_subject public.attendance_subjects;
+begin
+  update public.attendance_subjects
+  set name = trim(p_subject->>'name'),
+      code = coalesce(trim(p_subject->>'code'), ''),
+      faculty = coalesce(trim(p_subject->>'faculty'), ''),
+      subject_key = public.attendance_subject_key(p_subject->>'name', p_subject->>'code'),
+      name_key = public.normalize_subject(p_subject->>'name'),
+      updated_at = now()
+  where id = p_subject->>'id'
+    and lower(student_email) = lower(trim(p_student_email))
+  returning * into v_subject;
+
+  if v_subject.id is null then
+    raise exception 'Subject not found for this student.';
+  end if;
+
+  return v_subject;
+end;
+$$;
+
+create or replace function public.delete_attendance_subject(
+  p_student_email text,
+  p_subject_id    text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  delete from public.attendance_subjects
+  where id = p_subject_id
+    and lower(student_email) = lower(trim(p_student_email));
+end;
+$$;
+
+create or replace function public.log_attendance_class(
+  p_student_email text,
+  p_subject_id    text,
+  p_status        text,
+  p_date          date,
+  p_record_id     text
+)
+returns public.attendance_subjects
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_subject  public.attendance_subjects;
+  v_record   public.attendance_records;
+  v_counts   boolean;
+begin
+  if p_status not in ('present', 'absent', 'late', 'cancelled') then
+    raise exception 'Invalid attendance status.';
+  end if;
+  if p_date is null then
+    raise exception 'Attendance date is required.';
+  end if;
+
+  select *
+  into v_subject
+  from public.attendance_subjects
+  where id = p_subject_id
+    and lower(student_email) = lower(trim(p_student_email))
+  for update;
+
+  if v_subject.id is null then
+    raise exception 'Subject not found for this student.';
+  end if;
+
+  insert into public.attendance_records (
+    id, student_email, subject_id, subject_key, date, status, source
+  )
+  values (
+    p_record_id,
+    lower(trim(p_student_email)),
+    v_subject.id,
+    v_subject.subject_key,
+    p_date,
+    p_status,
+    'manual'
+  )
+  on conflict (id) do nothing
+  returning * into v_record;
+
+  if v_record.id is null then
+    -- Retried request: return the current counters without incrementing twice.
+    return v_subject;
+  end if;
+
+  v_counts := p_status <> 'cancelled';
+
+  update public.attendance_subjects
+  set held = held + case when v_counts then 1 else 0 end,
+      attended = attended + case when p_status in ('present', 'late') then 1 else 0 end,
+      updated_at = now()
+  where id = v_subject.id
+  returning * into v_subject;
+
+  return v_subject;
+end;
+$$;
+
+create or replace function public.set_attendance_counters(
+  p_student_email text,
+  p_subject_id    text,
+  p_held          integer,
+  p_attended      integer
+)
+returns public.attendance_subjects
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_subject public.attendance_subjects;
+begin
+  update public.attendance_subjects
+  set held = greatest(coalesce(p_held, 0), 0),
+      attended = least(
+        greatest(coalesce(p_attended, 0), 0),
+        greatest(coalesce(p_held, 0), 0)
+      ),
+      updated_at = now()
+  where id = p_subject_id
+    and lower(student_email) = lower(trim(p_student_email))
+  returning * into v_subject;
+
+  if v_subject.id is null then
+    raise exception 'Subject not found for this student.';
+  end if;
+
+  return v_subject;
+end;
+$$;
+
+create or replace function public.get_student_attendance_subjects(p_student_email text)
+returns setof public.attendance_subjects
+language sql
+security definer
+set search_path = public
+as $$
+  select *
+  from public.attendance_subjects
+  where lower(student_email) = lower(trim(p_student_email))
+  order by created_at desc;
+$$;
+
+create or replace function public.get_student_attendance_records(p_student_email text)
+returns setof public.attendance_records
+language sql
+security definer
+set search_path = public
+as $$
+  select *
+  from public.attendance_records
+  where lower(student_email) = lower(trim(p_student_email))
+  order by date desc, created_at desc;
+$$;
+
+-- -------------------------------------------------------------------
 -- Student: look up a code + check in
 -- -------------------------------------------------------------------
 
@@ -301,9 +849,13 @@ as $$
 declare
   v_session  public.attendance_sessions;
   v_checkin  public.attendance_checkins;
+  v_subject  public.attendance_subjects;
+  v_record   public.attendance_records;
   v_email    text := lower(trim(coalesce(p_student_email, '')));
   v_name     text := trim(coalesce(p_student_name, ''));
   v_roll     text := trim(coalesce(p_roll_number, ''));
+  v_name_key text;
+  v_full_key text;
 begin
   if coalesce(trim(p_code), '') = '' then
     raise exception 'Enter the attendance code shown by your faculty.';
@@ -329,6 +881,75 @@ begin
   if v_session.expires_at <= now() then
     raise exception 'This attendance code has expired. Ask your faculty for a new code.';
   end if;
+
+  if exists (
+    select 1
+    from public.attendance_checkins c
+    where c.session_id = v_session.id
+      and c.student_email = v_email
+  ) then
+    raise exception 'You have already checked in for this session.';
+  end if;
+
+  -- Resolve the student's ENROLLMENT. A check-in never creates enrollment.
+  v_name_key := public.normalize_subject(v_session.subject_name);
+  v_full_key := public.attendance_subject_key(
+    v_session.subject_name,
+    v_session.subject_code
+  );
+
+  select *
+  into v_subject
+  from public.attendance_subjects s
+  where lower(s.student_email) = v_email
+    and (s.subject_key = v_full_key or s.name_key = v_name_key)
+  order by (s.subject_key = v_full_key) desc, s.updated_at desc
+  limit 1;
+
+  if v_subject.id is null then
+    raise exception
+      'You are not enrolled in %. Add it on your Attendance page first, then check in again.',
+      v_session.subject_name;
+  end if;
+
+  if v_roll = '' then
+    v_roll := v_subject.student_id;
+  end if;
+
+  -- Fill in the roster identity if this device had not saved it yet.
+  update public.attendance_subjects
+  set student_name = case when student_name = '' then v_name else student_name end,
+      student_id = case when student_id = '' then v_roll else student_id end,
+      updated_at = now()
+  where id = v_subject.id;
+
+  -- Write the existing attendance model: one record per live session.
+  insert into public.attendance_records (
+    id, student_email, subject_id, subject_key, date, status, source, session_id
+  )
+  values (
+    'live-' || gen_random_uuid()::text,
+    v_email,
+    v_subject.id,
+    v_subject.subject_key,
+    (v_session.created_at at time zone 'utc')::date,
+    'present',
+    'live',
+    v_session.id
+  )
+  on conflict do nothing
+  returning * into v_record;
+
+  if v_record.id is null then
+    raise exception 'You have already checked in for this session.';
+  end if;
+
+  -- Keep the subject counters used by the Dashboard/Attendance pages.
+  update public.attendance_subjects
+  set held = held + 1,
+      attended = attended + 1,
+      updated_at = now()
+  where id = v_subject.id;
 
   insert into public.attendance_checkins (
     session_id, student_email, student_name, roll_number, checked_in_at
@@ -370,9 +991,26 @@ begin
     );
   exception
     when others then
+      null;
+  end;
+
+  begin
+    -- Global signal so staff dashboards can refresh their roster.
+    perform realtime.broadcast_changes(
+      'attendance-updates',
+      'check_in',
+      'INSERT',
+      'attendance_checkins',
+      'public',
+      new,
+      null::record
+    );
+  exception
+    when others then
       -- Never block a check-in because Realtime is unavailable.
       null;
   end;
+
   return new;
 end;
 $$;
@@ -394,3 +1032,16 @@ grant execute on function public.close_attendance_session(uuid, text) to anon, a
 grant execute on function public.get_attendance_session(text) to anon, authenticated;
 grant execute on function public.check_in_attendance(text, text, text, text) to anon, authenticated;
 grant execute on function public.generate_attendance_code() to anon, authenticated;
+
+grant execute on function public.sync_staff_attendance_subjects(text, jsonb) to anon, authenticated;
+grant execute on function public.get_staff_attendance_subjects(text) to anon, authenticated;
+grant execute on function public.get_staff_attendance(text) to anon, authenticated;
+grant execute on function public.import_student_attendance(text, text, text, text, text, jsonb, jsonb) to anon, authenticated;
+grant execute on function public.update_attendance_identity(text, text, text, text, text) to anon, authenticated;
+grant execute on function public.create_attendance_subject(text, jsonb, text, text, text, text) to anon, authenticated;
+grant execute on function public.update_attendance_subject(text, jsonb) to anon, authenticated;
+grant execute on function public.delete_attendance_subject(text, text) to anon, authenticated;
+grant execute on function public.log_attendance_class(text, text, text, date, text) to anon, authenticated;
+grant execute on function public.set_attendance_counters(text, text, integer, integer) to anon, authenticated;
+grant execute on function public.get_student_attendance_subjects(text) to anon, authenticated;
+grant execute on function public.get_student_attendance_records(text) to anon, authenticated;
