@@ -1,9 +1,11 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 
 import { Badge } from '@/components/ui/Badge'
 import { Card, EmptyState } from '@/components/ui/Card'
 import { ProgressBar } from '@/components/ui/ProgressBar'
+import { LiveAttendancePanel } from '@/features/attendance/components/LiveAttendancePanel'
 import { useStaffRoster, useVisibleActivities } from '@/hooks/useStaffData'
 import { createActivity, setSubjectCounters } from '@/lib/dataApi'
 import { riskTone, RISK_LABEL, RISK_TONE, percentToRisk } from '@/lib/attendance'
@@ -34,6 +36,12 @@ export function StaffDashboardPage({ email }: { email: string }) {
         <p className="mt-1 text-sm text-slate-500">
           {profile?.department || 'Department not set'} · attendance across your subjects
         </p>
+        <Link
+          to="/staff/attendance"
+          className="mt-3 inline-flex items-center gap-1 rounded-xl bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500"
+        >
+          Start live attendance code →
+        </Link>
       </header>
 
       {subjects.length === 0 ? (
@@ -295,9 +303,13 @@ export function StaffAttendancePage({ email }: { email: string }) {
           Attendance
         </h1>
         <p className="mt-1 text-sm text-slate-500">
-          Correct a student's classes held/attended. The student sees the change immediately.
+          Start a live attendance code for students, or correct a student's classes held/attended.
         </p>
       </header>
+
+      <div className="mt-4">
+        <LiveAttendancePanel email={email} />
+      </div>
 
       <div className="mt-4 space-y-3">
         {isLoading ? (

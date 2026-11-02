@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 
 import { RecommendationsCard } from '@/components/RecommendationsCard'
 import { AttendanceLogger } from '@/features/attendance/components/AttendanceLogger'
+import { StudentCheckIn } from '@/features/attendance/components/StudentCheckIn'
 import { SubjectManager } from '@/features/attendance/components/SubjectManager'
 import { useAttendance } from '@/hooks/useAttendance'
 import { useRecommendations } from '@/hooks/useRecommendations'
@@ -28,6 +29,8 @@ export function AttendancePage({ email }: { email: string }) {
           Track your attendance and plan how to reach your target.
         </p>
       </header>
+
+      <StudentCheckIn email={email} />
 
       {isLoading ? (
         <p className="mt-6 text-sm text-slate-500">

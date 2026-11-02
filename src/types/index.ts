@@ -32,6 +32,32 @@ export interface StudentProfile {
 
 export type AttendanceStatus = 'present' | 'absent' | 'late' | 'cancelled'
 
+/**
+ * A live attendance session created by staff. Sessions are stored in the
+ * shared Supabase database so students on any device can check in.
+ */
+export interface AttendanceSession {
+  id: string
+  code: string
+  subjectName: string
+  subjectCode: string
+  /** False when the session was closed or its expiry time passed. */
+  isOpen: boolean
+  createdAt: string
+  expiresAt: string
+  checkInCount: number
+}
+
+/** One student check-in belonging to a live attendance session. */
+export interface AttendanceCheckIn {
+  id: string
+  sessionId: string
+  studentEmail: string
+  studentName: string
+  rollNumber: string
+  checkedInAt: string
+}
+
 export interface Subject {
   id: string
   name: string
