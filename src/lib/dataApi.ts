@@ -835,7 +835,8 @@ async function rosterFromLocal(email: string): Promise<{
 /**
  * Builds the staff roster from the SAME shared attendance model students use:
  * a row exists only when a student is actually enrolled in a taught subject.
- * A live check-in increments that enrollment's counters; it never enrolls.
+ * Joining a live class with its code enrolls the student in that subject, so
+ * the roster updates without any extra setup on the student's device.
  */
 export async function fetchStaffRoster(email: string): Promise<{
   profile: StaffProfile
@@ -845,14 +846,28 @@ export async function fetchStaffRoster(email: string): Promise<{
   const profile = await fetchStaffProfile(email)
 
   if (isAttendanceSyncConfigured) {
+    let sharedError: unknown
+
     try {
       // Scope the server-side roster query to what this staff member teaches.
       await syncStaffSubjects(email, profile.subjects)
       const sharedRows = await fetchStaffAttendanceRows(email)
       return rosterFromSharedRows(profile, sharedRows)
-    } catch {
-      // Offline / schema not applied yet — fall back to this device's cache.
+    } catch (error) {
+      sharedError = error
     }
+
+    // Fall back to this device's cache only when it actually has rows. An
+    // empty local roster would misleadingly render "0 Students" when the
+    // shared query failed, hiding the real problem from staff.
+    const localRoster = await rosterFromLocal(email)
+    if (localRoster.rows.length > 0) {
+      return localRoster
+    }
+
+    throw sharedError instanceof Error
+      ? sharedError
+      : new Error('Could not load the shared student roster. Check your connection and try again.')
   }
 
   return rosterFromLocal(email)

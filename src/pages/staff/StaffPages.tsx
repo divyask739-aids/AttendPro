@@ -12,14 +12,32 @@ import { riskTone, RISK_LABEL, RISK_TONE, percentToRisk } from '@/lib/attendance
 import { addDaysISO, isoToday } from '@/lib/date'
 import type { AcademicActivity, TaskPriority } from '@/types'
 
+function RosterErrorNotice({ error }: { error: unknown }) {
+  return (
+    <div role="alert" className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+      <h2 className="text-sm font-semibold text-amber-900">Could not load your students</h2>
+      <p className="mt-1 text-xs text-amber-800">
+        {error instanceof Error
+          ? error.message
+          : 'The shared student data could not be loaded right now.'}
+      </p>
+      <p className="mt-1 text-xs text-amber-700">
+        Check your internet connection and refresh. Enrollments are saved in the shared database,
+        so students will reappear once the connection is restored.
+      </p>
+    </div>
+  )
+}
+
 /* ================================================================== *
  * 1. Dashboard                                                         *
  * ================================================================== */
 
 export function StaffDashboardPage({ email }: { email: string }) {
-  const { profile, subjects, rows, isLoading } = useStaffRoster(email)
+  const { profile, subjects, rows, isLoading, isError, error } = useStaffRoster(email)
 
   if (isLoading) return <p className="text-sm text-slate-500">Loading dashboard...</p>
+  if (isError) return <RosterErrorNotice error={error} />
 
   const overall =
     rows.length > 0
@@ -110,7 +128,7 @@ export function StaffDashboardPage({ email }: { email: string }) {
  * ================================================================== */
 
 export function StaffSubjectsPage({ email }: { email: string }) {
-  const { subjects } = useStaffRoster(email)
+  const { subjects, isError, error } = useStaffRoster(email)
 
   return (
     <div>
@@ -124,7 +142,9 @@ export function StaffSubjectsPage({ email }: { email: string }) {
       </header>
 
       <div className="mt-4">
-        {subjects.length === 0 ? (
+        {isError ? (
+          <RosterErrorNotice error={error} />
+        ) : subjects.length === 0 ? (
           <EmptyState
             title="No subjects assigned."
             description="Add subjects in your profile to unlock student analytics."
@@ -162,7 +182,7 @@ export function StaffSubjectsPage({ email }: { email: string }) {
  * ================================================================== */
 
 export function StaffStudentsPage({ email }: { email: string }) {
-  const { rows, subjects, isLoading } = useStaffRoster(email)
+  const { rows, subjects, isLoading, isError, error } = useStaffRoster(email)
   const [filter, setFilter] = useState('')
 
   const visible = rows.filter(
@@ -212,10 +232,12 @@ export function StaffStudentsPage({ email }: { email: string }) {
 
         {isLoading ? (
           <p className="text-sm text-slate-500">Loading students...</p>
+        ) : isError ? (
+          <RosterErrorNotice error={error} />
         ) : visible.length === 0 ? (
           <EmptyState
             title="No students found."
-            description="Students appear here once they add one of your subjects to their profile."
+            description="Students appear here after they join one of your classes with its code."
           />
         ) : (
           <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -286,7 +308,7 @@ function useCounterMutation() {
 }
 
 export function StaffAttendancePage({ email }: { email: string }) {
-  const { rows, isLoading } = useStaffRoster(email)
+  const { rows, isLoading, isError, error } = useStaffRoster(email)
   const counter = useCounterMutation()
 
   // subjectId is resolved by matching the student's subject name below.
@@ -315,10 +337,12 @@ export function StaffAttendancePage({ email }: { email: string }) {
       <div className="mt-4 space-y-3">
         {isLoading ? (
           <p className="text-sm text-slate-500">Loading records...</p>
+        ) : isError ? (
+          <RosterErrorNotice error={error} />
         ) : rows.length === 0 ? (
           <EmptyState
             title="No attendance records yet."
-            description="Records appear when students add your subjects and log classes."
+            description="Records appear when students join your class with its code and log classes."
           />
         ) : (
           rows.map((row) => (

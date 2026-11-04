@@ -53,7 +53,9 @@ export function StudentCheckIn({ email }: { email: string }) {
         <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div>
-              <p className="text-sm font-semibold text-emerald-800">Attendance marked</p>
+              <p className="text-sm font-semibold text-emerald-800">
+                Attendance marked · you joined this class
+              </p>
               <p className="mt-0.5 text-xs text-emerald-700">
                 {result.session.subjectName}
                 {result.session.subjectCode ? ` (${result.session.subjectCode})` : ''} · code{' '}
@@ -85,7 +87,8 @@ export function StudentCheckIn({ email }: { email: string }) {
           </dl>
 
           <p className="mt-3 text-xs text-emerald-700">
-            Your faculty's live list updates automatically. You can close this page.
+            This class now appears on your Attendance page, and your faculty's live list updates
+            automatically. You can close this page.
           </p>
 
           <button

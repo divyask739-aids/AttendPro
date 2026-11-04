@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AttendPro</title>
+    <script>
+      /*
+       * GitHub Pages SPA fallback.
+       *
+       * GitHub Pages has no rewrite rules, so a deep link like
+       * /AttendPro/staff/students is not a real file and returns this 404
+       * document. Instead of showing a 404, send the browser back to the app
+       * shell and carry the requested route in the query string.
+       *
+       * The tiny script at the top of index.html restores the route with
+       * history.replaceState before React Router reads window.location.
+       */
+      ;(function () {
+        var base = '/AttendPro/'
+        var l = window.location
+        var path = l.pathname
+
+        // Keep everything after the site base (for example "staff/students").
+        var route = path.indexOf(base) === 0 ? path.slice(base.length) : path.replace(/^\//, '')
+
+        // & inside the route/query is temporarily encoded so it is not
+        // confused with the separator between the route and the query.
+        var search = l.search ? '&' + l.search.slice(1).replace(/&/g, '~and~') : ''
+
+        l.replace(
+          base +
+            '?/' +
+            route.replace(/&/g, '~and~') +
+            search +
+            l.hash,
+        )
+      })()
+    </script>
+  </head>
+  <body>
+    <p>Redirecting to AttendPro…</p>
+  </body>
+</html>

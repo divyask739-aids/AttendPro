@@ -57,8 +57,9 @@ create index if not exists attendance_checkins_session_idx
 -- Shared attendance (the existing Subject + AttendanceRecord model)
 --
 -- attendance_subjects is the canonical enrollment list: one row per
--- student + subject. A check-in NEVER creates a row here; it only links
--- to an existing enrollment. That keeps "students enrolled" honest.
+-- student + subject. A valid live class code enrolls the student in
+-- exactly the subject named by that session, so joining by code makes
+-- the student visible on the staff roster immediately.
 -- -------------------------------------------------------------------
 
 create table if not exists public.attendance_subjects (
@@ -238,6 +239,25 @@ begin
         end if;
     end;
   end loop;
+
+  -- Mirror the class into the staff's roster scope immediately. A student who
+  -- joins with this code must be visible even if the profile sync has not run
+  -- yet or this device's local profile is out of date.
+  insert into public.attendance_staff_subjects (
+    staff_email, name, code, semester, subject_key, name_key
+  )
+  values (
+    lower(trim(p_staff_email)),
+    trim(p_subject_name),
+    coalesce(trim(p_subject_code), ''),
+    '',
+    public.attendance_subject_key(p_subject_name, p_subject_code),
+    public.normalize_subject(p_subject_name)
+  )
+  on conflict (staff_email, subject_key) do update
+    set name = excluded.name,
+        code = excluded.code,
+        name_key = excluded.name_key;
 
   return v_session;
 end;
@@ -856,6 +876,8 @@ declare
   v_roll     text := trim(coalesce(p_roll_number, ''));
   v_name_key text;
   v_full_key text;
+  v_course   text;
+  v_year     text;
 begin
   if coalesce(trim(p_code), '') = '' then
     raise exception 'Enter the attendance code shown by your faculty.';
@@ -891,7 +913,9 @@ begin
     raise exception 'You have already checked in for this session.';
   end if;
 
-  -- Resolve the student's ENROLLMENT. A check-in never creates enrollment.
+  -- Resolve the student's enrollment for this class. A valid class code is the
+  -- authorization to join, so the first successful check-in enrolls the student
+  -- in exactly the subject named by the staff's session.
   v_name_key := public.normalize_subject(v_session.subject_name);
   v_full_key := public.attendance_subject_key(
     v_session.subject_name,
@@ -907,9 +931,44 @@ begin
   limit 1;
 
   if v_subject.id is null then
-    raise exception
-      'You are not enrolled in %. Add it on your Attendance page first, then check in again.',
-      v_session.subject_name;
+    -- Reuse this student's existing course/year when they have other subjects.
+    select s.student_course, s.student_year
+    into v_course, v_year
+    from public.attendance_subjects s
+    where lower(s.student_email) = v_email
+    order by s.updated_at desc
+    limit 1;
+
+    insert into public.attendance_subjects (
+      id, student_email, student_name, student_id, student_course, student_year,
+      name, code, faculty, subject_key, name_key, held, attended
+    )
+    values (
+      'sub-' || gen_random_uuid()::text,
+      v_email,
+      v_name,
+      v_roll,
+      coalesce(v_course, ''),
+      coalesce(v_year, ''),
+      v_session.subject_name,
+      coalesce(v_session.subject_code, ''),
+      '',
+      v_full_key,
+      v_name_key,
+      0,
+      0
+    )
+    on conflict (student_email, subject_key) do update
+      set student_name = case
+            when public.attendance_subjects.student_name = '' then excluded.student_name
+            else public.attendance_subjects.student_name
+          end,
+          student_id = case
+            when public.attendance_subjects.student_id = '' then excluded.student_id
+            else public.attendance_subjects.student_id
+          end,
+          updated_at = now()
+    returning * into v_subject;
   end if;
 
   if v_roll = '' then

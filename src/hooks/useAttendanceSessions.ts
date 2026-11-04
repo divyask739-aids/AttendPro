@@ -140,10 +140,9 @@ export function useCheckInMutation() {
 
   return useMutation({
     mutationFn: async (input: CheckInInput) => {
-      // Make sure this device's existing subjects are uploaded first, so the
-      // database can see the enrollment the check-in is validated against.
-      // Best-effort: a failed upload must not block an otherwise valid check-in
-      // (the student may already be enrolled from another device).
+      // Upload this device's existing subjects first so their local attendance
+      // history is not lost. Best-effort: a valid code still enrolls the
+      // student even when this device has nothing cached.
       try {
         await ensureSharedAttendanceReady(input.studentEmail)
       } catch {

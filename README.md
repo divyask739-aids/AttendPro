@@ -11,8 +11,10 @@ are rejected by the database.
 
 A check-in also writes into the shared attendance model (`attendance_subjects` /
 `attendance_records`), so the Attendance page, both dashboards and the staff
-roster show the same percentages. A check-in never creates enrollment; the
-student must already have the subject.
+roster show the same percentages. A valid class code is the authorization to
+join: the first successful check-in enrolls the student in that class's subject,
+so staff see students who joined with the code even if the student never added
+the subject manually. Duplicate codes/check-ins never increase the roster count.
 
 Setup, schema upgrade notes, security policies and two-phone test steps:
 [docs/attendance-sync-setup.md](docs/attendance-sync-setup.md).

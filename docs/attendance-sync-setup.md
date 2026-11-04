@@ -20,10 +20,11 @@ instead of per-browser storage. `localStorage` remains a cache/fallback.
 | Subjects a staff member teaches | `attendance_staff_subjects` |
 | Profiles, tasks, goals, planner | Unchanged (`localStorage`) |
 
-Enrollment is a row in `attendance_subjects`. **A check-in never creates an
-enrollment.** It must match one of the student's existing subjects; otherwise the
-student is told to add that subject on their Attendance page first. This keeps
-"students enrolled" honest and stops one check-in from inventing a roster row.
+Enrollment is a row in `attendance_subjects`. **A valid live class code is the
+authorization to join:** the first successful check-in enrolls the student in
+exactly the subject named by that session (and reuses their existing enrollment
+if they already have one). That is why a student who only knows the code still
+appears on the staff roster — no manual "add subject" step is required.
 
 A check-in writes **two** linked rows in one transaction:
 
@@ -47,8 +48,10 @@ duplicate check-in impossible at the database level.
 ## 2. Apply / upgrade the database schema
 
 > **If you already ran an older version of this file, run it again.** The
-> earlier version only stored live check-ins; the shared subject/record tables
-> and the check-in → attendance wiring are new.
+> current version adds join-by-code enrollment: a valid class code enrolls the
+> student in the session's subject, and starting a class adds that subject to
+> the staff roster scope. Older schemas reject students who have not manually
+> added the subject, which shows up as "0 Students" on the staff dashboard.
 
 1. In Supabase, open **SQL Editor → New query**.
 2. Paste the whole of [`supabase/schema.sql`](../supabase/schema.sql) and run it.
@@ -108,9 +111,15 @@ happens when the account has no shared subjects yet, so stale device caches can
 never overwrite live/manual counters.
 
 For a subject to connect a student and a staff member, **both must use the same
-subject identity**: the normalized subject code + name. The simplest rule is to
-type the same subject name and code in the student's Attendance → Subjects form
-and in the staff member's Profile → Subjects list.
+subject identity**: the normalized subject code + name. When a class is started,
+the subject is added to the staff member's roster scope automatically, and the
+first student who checks in with that code is enrolled in it automatically, so
+the code alone is enough to connect them.
+
+Existing local attendance is still uploaded automatically the first time an
+account opens a page that reads attendance (Dashboard or Attendance). The upload
+only happens when the account has no shared subjects yet, so stale device caches
+can never overwrite live/manual counters.
 
 ## 6. Test with two phones (end to end)
 
@@ -118,31 +127,39 @@ and in the staff member's Profile → Subjects list.
    **Profile**, then open **Attendance**.
 2. Pick the subject, set the duration, tap **Start session**. A 6-character code
    appears with a countdown.
-3. On **Phone B**, log in as a student (register if needed). Add the **same
-   subject name + code** under **Attendance → Subjects** if it is not there yet.
+3. On **Phone B**, log in as a student (register if needed). You do **not** need
+   to add the subject first — the class code enrolls you.
 4. Open **Attendance → Check in to class**, enter the code and roll number, tap
    **Mark attendance**.
-5. On Phone A the student appears within a few seconds (Realtime, with 4-second
+5. Phone B shows "Attendance marked · you joined this class", and the subject
+   appears under the student's Attendance subjects.
+6. On Phone A the student appears within a few seconds (Realtime, with 4-second
    polling fallback): name, roll number, check-in time and present count. A
    green "just checked in" banner appears.
-6. On Phone B, the subject now shows one more held/attended class and the
+7. On Phone B, the subject now shows one more held/attended class and the
    Dashboard percentage updates. On Phone A, the dashboard "Students enrolled",
    subject performance and Students/Attendance lists include the student (15 s
    polling + broadcast).
-7. Enter the same code again on Phone B → `You have already checked in for this
-   session.` The percentage must **not** change.
-8. Enter a wrong code → `Invalid attendance code...`
-9. Close the session on Phone A, then try the code → `This attendance session
-   has been closed.`
-10. Refresh both phones. Sessions, check-ins, enrollments and percentages reload
-    from Supabase.
+8. Repeat with a second student account on a third phone. Phone A's "Students
+   enrolled" count goes 1 → 2 and both students are listed.
+9. Enter the same code again on Phone B → `You have already checked in for this
+   session.` The count and percentage must **not** change.
+10. Enter a wrong code → `Invalid attendance code...` No enrollment is created.
+11. Close the session on Phone A, then try the code → `This attendance session
+    has been closed.`
+12. Refresh both phones, sign out and back in, or repeat on a new device.
+    Sessions, check-ins, enrollments and percentages reload from Supabase.
 
 ## Security model
 
 - Tables have RLS enabled and all privileges revoked from `anon` and
   `authenticated`. Direct reads/writes are impossible with the public key.
-- `check_in_attendance` validates the code, the open/expired state, the
-  enrollment and duplicates inside Postgres, and writes both rows atomically.
+- `check_in_attendance` validates the code, the open/expired state and duplicates
+  inside Postgres, then enrolls the caller in the session's subject and writes
+  both rows atomically.
+- A student can only enroll themselves: the RPC uses the caller's own email and
+  reuses that student's existing enrollment. It never touches another student's
+  row.
 - Staff read check-ins only through `get_attendance_checkins(session_id,
   staff_email)`, which verifies the session belongs to that email.
 - The staff roster is scoped server-side by `attendance_staff_subjects`, so a
@@ -160,13 +177,15 @@ isolation, move accounts to Supabase Auth and replace the email arguments with
 
 ## Troubleshooting
 
-- **The live panel gets check-ins but the Dashboard still shows 0 enrolled** —
-  the deployed database is still on the old schema, or the student never added
-  the subject. Run the current `supabase/schema.sql`, then make sure the
-  student's subject name/code matches the staff member's subject.
-- **"You are not enrolled in ..."** — the student's subject identity differs
-  from the session subject. Add/edit it under Attendance → Subjects so the
-  code + name match, then check in again.
+- **The staff dashboard still shows 0 students** — the deployed database is
+  still on the old schema. Run the current `supabase/schema.sql` in the Supabase
+  SQL editor; older versions reject students who have not pre-added the subject.
+  After that, a student joining with the class code is enrolled automatically.
+- **"Could not load your students"** — the shared roster query failed (offline,
+  paused project or schema not applied). The app no longer shows a misleading
+  "0 Students" when the shared read fails; fix the connection and refresh.
+- **"Invalid attendance code"** — the code was mistyped, has expired, or belongs
+  to a closed session. Ask the staff member for the current code.
 - **"Shared backend not configured"** — `.env.local` is missing the two
   variables, or the build ran before they were set.
 - **"Could not find the function ... in the schema cache"** — re-run

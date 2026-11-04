@@ -45,6 +45,7 @@ export function useStaffRoster(email: string | undefined) {
     rows: query.data?.rows ?? [],
     isLoading: query.isLoading,
     isError: query.isError,
+    error: query.error,
   }
 }
 
