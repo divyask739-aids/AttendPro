@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.1",
+    "@mediapipe/tasks-vision": "^1.2.2",
     "@supabase/supabase-js": "^2.118.0",
     "@tanstack/react-query": "^5.85.3",
     "motion": "^14.0.0",
