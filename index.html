@@ -9,10 +9,33 @@
       content="AttendPro helps students track attendance, tasks, and daily goals in one place."
     />
     <title>AttendPro · Attendance &amp; Productivity</title>
-    <script type="module" crossorigin src="/AttendPro/assets/index-DeanfnFI.js"></script>
-    <link rel="stylesheet" crossorigin href="/AttendPro/assets/index-N1w8juIJ.css">
+    <script>
+      /*
+       * Restores a deep link that GitHub Pages served through 404.html.
+       *
+       * 404.html redirects /AttendPro/staff/students?tab=x#top to
+       * /AttendPro/?/staff/students&tab=x#top. Rewrite that back to the real
+       * URL before React Router mounts, so the correct route renders and
+       * query parameters/hash are preserved.
+       */
+      ;(function (l) {
+        if (l.search[1] !== '/') return
+
+        var decoded = l.search
+          .slice(1)
+          .split('&')
+          .map(function (part) {
+            return part.replace(/~and~/g, '&')
+          })
+          .join('?')
+
+        window.history.replaceState(null, '', l.pathname.slice(0, -1) + decoded + l.hash)
+      })(window.location)
+    </script>
+    <script type="module" crossorigin src="/AttendPro/assets/index-CVW_I9i7.js"></script>
+    <link rel="stylesheet" crossorigin href="/AttendPro/assets/index-DEC8euFM.css">
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"></div>
   </body>
 </html>
