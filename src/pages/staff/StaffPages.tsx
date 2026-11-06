@@ -5,6 +5,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Badge } from '@/components/ui/Badge'
 import { Card, EmptyState } from '@/components/ui/Card'
 import { ProgressBar } from '@/components/ui/ProgressBar'
+import { CameraAttendancePanel } from '@/features/attendance/components/CameraAttendancePanel'
 import { LiveAttendancePanel } from '@/features/attendance/components/LiveAttendancePanel'
 import { useStaffRoster, useVisibleActivities } from '@/hooks/useStaffData'
 import { createActivity, setSubjectCounters } from '@/lib/dataApi'
@@ -308,7 +309,7 @@ function useCounterMutation() {
 }
 
 export function StaffAttendancePage({ email }: { email: string }) {
-  const { rows, isLoading, isError, error } = useStaffRoster(email)
+  const { profile, rows, isLoading, isError, error } = useStaffRoster(email)
   const counter = useCounterMutation()
 
   // subjectId is resolved by matching the student's subject name below.
@@ -329,6 +330,14 @@ export function StaffAttendancePage({ email }: { email: string }) {
           Start a live attendance code for students, or correct a student's classes held/attended.
         </p>
       </header>
+
+      <div className="mt-4">
+        <CameraAttendancePanel
+          email={email}
+          subjects={profile?.subjects ?? []}
+          rows={rows}
+        />
+      </div>
 
       <div className="mt-4">
         <LiveAttendancePanel email={email} />
