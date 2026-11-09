@@ -17,14 +17,17 @@ import {
   patchProductivityGoal,
   patchTask,
   registerAccount,
+  requestPasswordReset,
+  submitStudentVerification,
   rescheduleOverdueTasks,
   saveStaffProfile,
   saveStudentProfile,
   updateSubject,
   updateTask,
+  updatePassword,
   type AcademicActivityInput,
-  type Credentials,
   type ProductivityGoalInput,
+  type StudentRegistrationInput,
   type SubjectInput,
   type TaskInput,
 } from '@/lib/dataApi'
@@ -32,43 +35,60 @@ import { logAttendance } from '@/lib/dataApi'
 import type {
   AttendanceStatus,
   ProductivityGoal,
+  Session,
   StaffProfile,
   StudentProfile,
   Subject,
   Task,
-  UserRole,
 } from '@/types'
 
 /* ------------------------------ session ------------------------------ */
 
 export function useSession() {
-  const query = useQuery({ queryKey: ['session'], queryFn: getSession, staleTime: 30_000 })
-  return { session: query.data ?? null, isLoading: query.isLoading }
+  const query = useQuery({
+    queryKey: ['session'],
+    queryFn: getSession,
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+    retry: false,
+  })
+  return {
+    session: query.data ?? null,
+    isLoading: query.isLoading,
+    isError: query.isError,
+    error: query.error,
+    refetch: query.refetch,
+  }
 }
 
 export function useAuthMutations() {
   const queryClient = useQueryClient()
-  const refresh = () => {
-    void queryClient.invalidateQueries({ queryKey: ['session'] })
-  }
 
   const register = useMutation({
-    mutationFn: (credentials: Credentials) => registerAccount(credentials),
-    onSuccess: refresh,
+    mutationFn: (credentials: StudentRegistrationInput) => registerAccount(credentials),
   })
 
   const login = useMutation({
-    mutationFn: (input: { email: string; role: UserRole }) =>
-      loginAccount(input.email, input.role),
-    onSuccess: refresh,
+    mutationFn: (input: { email: string; password: string }) =>
+      loginAccount(input.email, input.password),
+    onSuccess: (session) => queryClient.setQueryData<Session>(['session'], session),
   })
 
   const logout = useMutation({
     mutationFn: () => logoutAccount(),
-    onSuccess: refresh,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['session'] }),
   })
 
-  return { register, login, logout }
+  const resetPassword = useMutation({
+    mutationFn: (email: string) => requestPasswordReset(email),
+  })
+
+  const changePassword = useMutation({
+    mutationFn: (password: string) => updatePassword(password),
+    onSuccess: (session) => queryClient.setQueryData<Session>(['session'], session),
+  })
+
+  return { register, login, logout, resetPassword, changePassword }
 }
 
 /* ------------------------------ profiles ----------------------------- */
@@ -126,6 +146,24 @@ export function useProfileMutations(email: string | undefined) {
   })
 
   return { saveStudent, saveStaff }
+}
+
+export function useStudentVerificationMutation(email: string | undefined) {
+  const queryClient = useQueryClient()
+  const submitVerification = useMutation({
+    mutationFn: (details: {
+      rollNumber: string
+      department: string
+      year: string
+      section: string
+    }) => submitStudentVerification(email ?? '', details),
+    onSuccess: (profile) => {
+      queryClient.setQueryData(['profile', email], profile)
+      void queryClient.invalidateQueries({ queryKey: ['staff-roster'] })
+      void queryClient.invalidateQueries({ queryKey: ['student-verifications'] })
+    },
+  })
+  return { submitVerification }
 }
 
 /* ---------------- subjects / attendance (shared model) -------------- */

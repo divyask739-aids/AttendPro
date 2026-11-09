@@ -2,6 +2,7 @@ import { rescheduleMissedWork } from '@/features/planner/plannerEngine'
 import { reminderOf } from '@/features/tasks/taskMeta'
 import {
   createSharedSubject,
+  correctOfficialAttendanceCounters,
   deleteSharedSubject,
   fetchSharedRecords,
   fetchSharedStaffSubjects,
@@ -9,8 +10,6 @@ import {
   fetchStaffAttendanceRows,
   importSharedAttendance,
   logSharedAttendance,
-  setSharedSubjectCounters,
-  syncStaffSubjects,
   updateSharedIdentity,
   updateSharedSubject,
   type SharedIdentity,
@@ -26,6 +25,8 @@ import {
   removeStore,
   storageKeys,
   writeStore,
+  writeStoreOrThrow,
+  writeStoresOrThrow,
 } from '@/lib/storage'
 import type {
   AcademicActivity,
@@ -36,6 +37,8 @@ import type {
   StaffProfile,
   StudentAttendanceRow,
   StudentProfile,
+  StudentVerificationRecord,
+  StudentVerificationStatus,
   Subject,
   Task,
   TaskPriority,
@@ -59,8 +62,94 @@ function readUsers(): UserAccount[] {
   )
 }
 
-export function getSession(): Session | null {
-  return readStore<Session | null>(storageKeys.session, null)
+export interface StudentRegistrationInput {
+  email: string
+  password: string
+  fullName: string
+  role: UserRole
+  rollNumber?: string
+  department?: string
+  year?: string
+  section?: string
+  designation?: string
+}
+
+const PASSWORD_ITERATIONS = 210_000
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  return Uint8Array.from(atob(value), (character) => character.charCodeAt(0))
+}
+
+async function derivePasswordHash(password: string, salt: Uint8Array): Promise<Uint8Array> {
+  if (!globalThis.crypto?.subtle) {
+    throw new Error('Secure browser cryptography is unavailable. Use HTTPS or localhost.')
+  }
+  const saltBuffer = new ArrayBuffer(salt.byteLength)
+  const saltBytes = new Uint8Array(saltBuffer)
+  saltBytes.set(salt)
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(password),
+    'PBKDF2',
+    false,
+    ['deriveBits'],
+  )
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt: saltBytes, iterations: PASSWORD_ITERATIONS },
+    key,
+    256,
+  )
+  return new Uint8Array(bits)
+}
+
+async function passwordHash(password: string, salt = crypto.getRandomValues(new Uint8Array(16))) {
+  return {
+    salt: bytesToBase64(salt),
+    hash: bytesToBase64(await derivePasswordHash(password, salt)),
+  }
+}
+
+function timingSafeEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false
+  let difference = 0
+  for (let index = 0; index < left.length; index += 1) {
+    difference |= (left[index] ?? 0) ^ (right[index] ?? 0)
+  }
+  return difference === 0
+}
+
+function makeSession(account: UserAccount): Session {
+  return {
+    id: makeId('session'),
+    email: account.email,
+    fullName: account.fullName,
+    role: account.role,
+    loggedInAt: new Date().toISOString(),
+  }
+}
+
+export async function getSession(): Promise<Session | null> {
+  const saved = readStore<unknown>(storageKeys.session, null)
+  if (
+    typeof saved !== 'object' ||
+    saved === null ||
+    typeof (saved as Session).email !== 'string' ||
+    typeof (saved as Session).fullName !== 'string' ||
+    ((saved as Session).role !== 'student' && (saved as Session).role !== 'staff') ||
+    typeof (saved as Session).loggedInAt !== 'string'
+  ) {
+    return null
+  }
+  const session = saved as Session
+  const account = getAccount(session.email)
+  if (!account || account.role !== session.role) return null
+  return { ...session, id: session.id || makeId('session') }
 }
 
 export function getUsers(): UserAccount[] {
@@ -72,69 +161,236 @@ export function getAccount(email: string): UserAccount | null {
   return readUsers().find((user) => user.email === target) ?? null
 }
 
-export interface Credentials {
-  email: string
-  fullName: string
-  role: UserRole
-  studentId?: string
-  staffId?: string
+export function isLocalAccount(email: string): boolean {
+  return Boolean(getAccount(email))
 }
 
-export async function registerAccount(credentials: Credentials): Promise<Session> {
+function shouldUseSharedAttendance(email: string): boolean {
+  return isAttendanceSyncConfigured && !isLocalAccount(email)
+}
+
+type VerificationDetails = {
+  rollNumber: string
+  department: string
+  year: string
+  section: string
+}
+
+function normalizeVerificationValue(value: string | undefined): string {
+  return value?.trim().toLocaleLowerCase() ?? ''
+}
+
+function validateVerificationDetails(
+  details: Partial<VerificationDetails>,
+): VerificationDetails {
+  const normalized = {
+    rollNumber: details.rollNumber?.trim() ?? '',
+    department: details.department?.trim() ?? '',
+    year: details.year?.trim() ?? '',
+    section: details.section?.trim() ?? '',
+  }
+  if (Object.values(normalized).some((value) => !value)) {
+    throw new Error('Enter your roll number, department, year, and section.')
+  }
+  if (normalized.rollNumber.length > 32 || normalized.department.length > 80) {
+    throw new Error('Roll number or department is too long.')
+  }
+  if (normalized.year.length > 24 || normalized.section.length > 24) {
+    throw new Error('Year or section is too long.')
+  }
+  return normalized
+}
+
+async function assertUniqueStudentRoll(
+  email: string,
+  details: VerificationDetails,
+): Promise<void> {
+  const targetRoll = normalizeVerificationValue(details.rollNumber)
+  const targetDepartment = normalizeVerificationValue(details.department)
+  const targetYear = normalizeVerificationValue(details.year)
+  const targetSection = normalizeVerificationValue(details.section)
+  const otherStudents = readUsers().filter(
+    (account) => account.role === 'student' && account.email !== email,
+  )
+
+  for (const account of otherStudents) {
+    const profile = await fetchStudentProfile(account.email)
+    if (
+      normalizeVerificationValue(profile.rollNumber) === targetRoll &&
+      normalizeVerificationValue(profile.department) === targetDepartment &&
+      normalizeVerificationValue(profile.year) === targetYear &&
+      normalizeVerificationValue(profile.section) === targetSection
+    ) {
+      throw new Error('That roll number is already registered for this department, year, and section.')
+    }
+  }
+}
+
+async function assertUniqueStudentId(email: string, studentId: string): Promise<void> {
+  const normalizedId = studentId.trim().toLocaleUpperCase()
+  if (!normalizedId) throw new Error('A unique student ID is required before verification.')
+  const otherStudents = readUsers().filter(
+    (account) => account.role === 'student' && account.email !== email,
+  )
+
+  for (const account of otherStudents) {
+    const profile = await fetchStudentProfile(account.email)
+    if (profile.studentId.trim().toLocaleUpperCase() === normalizedId) {
+      throw new Error('This student ID is already assigned to another account.')
+    }
+  }
+}
+
+export async function registerAccount(
+  credentials: StudentRegistrationInput,
+): Promise<void> {
   const email = credentials.email.trim().toLowerCase()
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('Enter a valid email address.')
+  if (credentials.password.length < 6) throw new Error('Password must contain at least 6 characters.')
+  if (credentials.fullName.trim().length < 2) throw new Error('Enter your full name.')
+
+  const existing = getAccount(email)
+  if (existing?.passwordHash && existing.passwordSalt) {
+    throw new Error('An account already exists for this email. Please log in.')
+  }
+  if (existing && existing.role !== credentials.role) {
+    throw new Error(`This existing account has the ${existing.role} role.`)
+  }
+
+  const { salt, hash } = await passwordHash(credentials.password)
   const account: UserAccount = {
     email,
-    fullName: credentials.fullName.trim(),
+    fullName: existing?.fullName || credentials.fullName.trim(),
     role: credentials.role,
-    createdAt: new Date().toISOString(),
+    createdAt: existing?.createdAt ?? new Date().toISOString(),
+    passwordSalt: salt,
+    passwordHash: hash,
+    passwordIterations: PASSWORD_ITERATIONS,
   }
-  writeStore(storageKeys.users, [...readUsers(), account])
+  const users = readUsers()
+  const nextUsers = existing
+    ? users.map((user) => (user.email === email ? account : user))
+    : [...users, account]
 
-  // Seed the role-specific profile so setup flows start from a clean slate.
+  let profile: StudentProfile | StaffProfile
   if (credentials.role === 'student') {
-    await saveStudentProfile(email, {
-      fullName: account.fullName,
-      email,
-      studentId: credentials.studentId ?? '',
-      institution: '',
-      course: '',
-      year: '',
-      semester: '',
-      dailyStudyMinutes: 180,
+    const details = validateVerificationDetails({
+      rollNumber: credentials.rollNumber,
+      department: credentials.department,
+      year: credentials.year,
+      section: credentials.section,
     })
-  } else {
-    await saveStaffProfile(email, {
-      fullName: account.fullName,
+    await assertUniqueStudentRoll(email, details)
+    const currentProfile = await fetchStudentProfile(email)
+    const studentId = currentProfile.studentId || await makeUniqueStudentId(nextUsers)
+    await assertUniqueStudentId(email, studentId)
+    profile = {
+      ...EMPTY_STUDENT_PROFILE,
+      ...currentProfile,
+      fullName: currentProfile.fullName || account.fullName,
       email,
-      staffId: credentials.staffId ?? '',
+      studentId,
+      rollNumber: currentProfile.rollNumber || details.rollNumber,
+      department: currentProfile.department || details.department,
+      year: currentProfile.year || details.year,
+      section: currentProfile.section || details.section,
+      verificationStatus: currentProfile.verificationStatus ?? 'not_submitted',
+    }
+  } else {
+    const department = credentials.department?.trim() ?? ''
+    const designation = credentials.designation?.trim() ?? ''
+    if (!department || !designation) {
+      throw new Error('Enter your department and staff designation.')
+    }
+    if (department.length > 80 || designation.length > 80) {
+      throw new Error('Department or staff designation is too long.')
+    }
+    profile = readStore<StaffProfile>(dataKey(email, 'staffProfile'), {
+      fullName: '',
+      email,
+      staffId: '',
       department: '',
       designation: '',
       academicYear: '',
       subjects: [],
     })
+    profile = {
+      ...profile,
+      fullName: profile.fullName || account.fullName,
+      email,
+      department: profile.department || department,
+      designation: profile.designation || designation,
+    }
   }
 
-  const session: Session = { ...account, loggedInAt: new Date().toISOString() }
-  writeStore(storageKeys.session, session)
+  writeStoresOrThrow([
+    [storageKeys.users, nextUsers],
+    [dataKey(email, credentials.role === 'student' ? 'profile' : 'staffProfile'), profile],
+  ])
+}
+
+export async function loginAccount(
+  emailInput: string,
+  password: string,
+): Promise<Session> {
+  const account = getAccount(emailInput)
+  if (!account) throw new Error('No local account was found for that email. Create an account on this device.')
+  if (!account.passwordHash || !account.passwordSalt) {
+    throw new Error('This older local account has no password. Re-create it with a password to continue.')
+  }
+  const derived = await derivePasswordHash(password, base64ToBytes(account.passwordSalt))
+  if (!timingSafeEqual(derived, base64ToBytes(account.passwordHash))) {
+    throw new Error('The email or password is incorrect.')
+  }
+
+  const session = makeSession(account)
+  writeStoreOrThrow(storageKeys.session, session)
   return session
 }
 
-export async function loginAccount(emailInput: string, role: UserRole): Promise<Session> {
-  const email = emailInput.trim().toLowerCase()
-  const account = getAccount(email)
-  if (!account) throw new Error('No account found for that email. Please register first.')
-  if (account.role !== role) {
-    throw new Error(
-      `This account is registered as ${account.role}. Please continue to the ${account.role} portal.`,
-    )
+export async function requestPasswordReset(emailInput: string): Promise<void> {
+  if (!emailInput.trim()) throw new Error('Enter your email address first.')
+  throw new Error('Password reset is not configured for browser-based accounts. Contact an administrator.')
+}
+
+export async function updatePassword(password: string): Promise<Session> {
+  if (password.length < 6) throw new Error('Password must contain at least 6 characters.')
+  const session = await getSession()
+  if (!session) throw new Error('No signed-in local account is available.')
+  const account = getAccount(session.email)
+  if (!account) throw new Error('No local account is available.')
+  const { salt, hash } = await passwordHash(password)
+  const updated = {
+    ...account,
+    passwordSalt: salt,
+    passwordHash: hash,
+    passwordIterations: PASSWORD_ITERATIONS,
   }
-  const session: Session = { ...account, loggedInAt: new Date().toISOString() }
-  writeStore(storageKeys.session, session)
-  return session
+  writeStoreOrThrow(
+    storageKeys.users,
+    readUsers().map((user) => (user.email === account.email ? updated : user)),
+  )
+  return makeSession(updated)
 }
 
 export async function logoutAccount(): Promise<void> {
   removeStore(storageKeys.session)
+}
+
+async function makeUniqueStudentId(accounts: UserAccount[]): Promise<string> {
+  const profiles = await Promise.all(
+    accounts
+      .filter((account) => account.role === 'student')
+      .map((account) => fetchStudentProfile(account.email)),
+  )
+  const existingIds = new Set(profiles.map((profile) => profile.studentId))
+  let studentId = ''
+  do {
+    const bytes = crypto.getRandomValues(new Uint8Array(8))
+    const suffix = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+    studentId = `STU-${suffix.toUpperCase()}`
+  } while (existingIds.has(studentId))
+  return studentId
 }
 
 /* ================================================================== *
@@ -149,6 +405,7 @@ export const EMPTY_STUDENT_PROFILE: StudentProfile = {
   course: '',
   year: '',
   semester: '',
+  verificationStatus: 'not_submitted',
   dailyStudyMinutes: 180,
 }
 
@@ -159,32 +416,153 @@ export async function fetchStudentProfile(email: string): Promise<StudentProfile
   )
 }
 
+export async function submitStudentVerification(
+  emailInput: string,
+  submittedDetails: VerificationDetails,
+): Promise<StudentProfile> {
+  const email = emailInput.trim().toLowerCase()
+  const account = getAccount(email)
+  const session = await getSession()
+  if (!account || account.role !== 'student' || session?.role !== 'student' || session.email !== email) {
+    throw new Error('A signed-in student account is required to submit verification.')
+  }
+
+  const currentProfile = await fetchStudentProfile(email)
+  if (currentProfile.verificationStatus === 'verified') {
+    throw new Error('This student account has already been verified.')
+  }
+
+  const details = validateVerificationDetails(submittedDetails)
+  await assertUniqueStudentRoll(email, details)
+  await assertUniqueStudentId(email, currentProfile.studentId)
+  const updatedProfile: StudentProfile = {
+    ...currentProfile,
+    ...details,
+    verificationStatus: 'pending',
+    verificationNote: '',
+    verificationReviewedBy: '',
+    verificationReviewedAt: '',
+    verifiedAt: '',
+  }
+  writeStoreOrThrow(dataKey(email, 'profile'), updatedProfile)
+  return updatedProfile
+}
+
+export async function fetchStudentVerificationRecords(
+  staffEmailInput: string,
+): Promise<StudentVerificationRecord[]> {
+  const staffEmail = staffEmailInput.trim().toLowerCase()
+  const staff = getAccount(staffEmail)
+  const session = await getSession()
+  if (!staff || staff.role !== 'staff' || session?.role !== 'staff' || session.email !== staffEmail) {
+    throw new Error('A signed-in staff account is required to review student verification.')
+  }
+
+  const students = readUsers().filter((account) => account.role === 'student')
+  const profiles = await Promise.all(
+    students.map(async (account) => ({
+      account,
+      profile: await fetchStudentProfile(account.email),
+    })),
+  )
+  return profiles.map(({ account, profile }) => ({
+    email: account.email,
+    fullName: profile.fullName || account.fullName,
+    studentId: profile.studentId,
+    rollNumber: profile.rollNumber ?? '',
+    department: profile.department ?? '',
+    year: profile.year,
+    section: profile.section ?? '',
+    status: profile.verificationStatus ?? 'not_submitted',
+    note: profile.verificationNote ?? '',
+  }))
+}
+
+export async function reviewStudentVerification(
+  staffEmailInput: string,
+  studentEmailInput: string,
+  decision: Extract<StudentVerificationStatus, 'verified' | 'rejected'>,
+  note = '',
+): Promise<StudentProfile> {
+  const staffEmail = staffEmailInput.trim().toLowerCase()
+  const studentEmail = studentEmailInput.trim().toLowerCase()
+  const staff = getAccount(staffEmail)
+  const student = getAccount(studentEmail)
+  const session = await getSession()
+  if (!staff || staff.role !== 'staff' || session?.role !== 'staff' || session.email !== staffEmail) {
+    throw new Error('A signed-in staff account is required to review student verification.')
+  }
+  if (!student || student.role !== 'student') {
+    throw new Error('The student account could not be found in this browser.')
+  }
+
+  const profile = await fetchStudentProfile(studentEmail)
+  if (profile.verificationStatus !== 'pending') {
+    throw new Error('Only pending student verification requests can be reviewed.')
+  }
+  if (decision === 'verified') {
+    await assertUniqueStudentRoll(studentEmail, validateVerificationDetails(profile))
+    await assertUniqueStudentId(studentEmail, profile.studentId)
+  }
+  const reviewerNote = note.trim()
+  if (reviewerNote.length > 240) throw new Error('Review notes must be 240 characters or fewer.')
+  const now = new Date().toISOString()
+  const updatedProfile: StudentProfile = {
+    ...profile,
+    verificationStatus: decision,
+    verificationNote: reviewerNote,
+    verificationReviewedBy: staffEmail,
+    verificationReviewedAt: now,
+    verifiedAt: decision === 'verified' ? now : '',
+  }
+  writeStoreOrThrow(dataKey(studentEmail, 'profile'), updatedProfile)
+  return updatedProfile
+}
+
 export async function saveStudentProfile(
   email: string,
   profile: StudentProfile,
 ): Promise<StudentProfile> {
-  writeStore(dataKey(email, 'profile'), profile)
+  const currentProfile = await fetchStudentProfile(email)
+  const savedProfile: StudentProfile = {
+    ...profile,
+    fullName:
+      currentProfile.verificationStatus === 'verified'
+        ? currentProfile.fullName
+        : profile.fullName,
+    studentId: currentProfile.studentId || profile.studentId,
+    rollNumber: currentProfile.rollNumber,
+    department: currentProfile.department,
+    year: currentProfile.year,
+    section: currentProfile.section,
+    verificationStatus: currentProfile.verificationStatus ?? 'not_submitted',
+    verificationNote: currentProfile.verificationNote,
+    verificationReviewedBy: currentProfile.verificationReviewedBy,
+    verificationReviewedAt: currentProfile.verificationReviewedAt,
+    verifiedAt: currentProfile.verifiedAt,
+  }
+  writeStoreOrThrow(dataKey(email, 'profile'), savedProfile)
   const account = getAccount(email)
   if (account) {
     writeStore(
       storageKeys.users,
       readUsers().map((user) =>
-        user.email === email ? { ...user, fullName: profile.fullName || user.fullName } : user,
+        user.email === email ? { ...user, fullName: savedProfile.fullName || user.fullName } : user,
       ),
     )
   }
 
   // Keep the shared roster's name/roll/course in sync. This is best-effort:
   // a network hiccup must not block editing the local profile.
-  if (isAttendanceSyncConfigured) {
+  if (shouldUseSharedAttendance(email)) {
     try {
-      await updateSharedIdentity(email, identityFromProfile(profile))
-    } catch {
+      await updateSharedIdentity(email, identityFromProfile(savedProfile))
+    } catch (error) {
       // The next profile save or roster fetch retries.
     }
   }
 
-  return profile
+  return savedProfile
 }
 
 function identityFromProfile(profile: StudentProfile): SharedIdentity {
@@ -220,7 +598,7 @@ function writeSubjects(email: string, subjects: Subject[]): void {
 const sharedImportCache = new Map<string, Promise<void>>()
 
 export async function ensureSharedAttendanceReady(email: string): Promise<void> {
-  if (!isAttendanceSyncConfigured || !email) return
+  if (!shouldUseSharedAttendance(email) || !email) return
 
   const key = email.toLowerCase()
   const cached = sharedImportCache.get(key)
@@ -248,11 +626,11 @@ export async function ensureSharedAttendanceReady(email: string): Promise<void> 
 }
 
 export async function fetchSubjects(email: string): Promise<Subject[]> {
-  if (isAttendanceSyncConfigured) {
+  if (shouldUseSharedAttendance(email)) {
     try {
       await ensureSharedAttendanceReady(email)
       return await fetchSharedSubjects(email)
-    } catch {
+    } catch (error) {
       // Offline or schema not applied yet — keep the local cache usable.
     }
   }
@@ -274,7 +652,7 @@ export async function createSubject(
     attended: 0,
   }
 
-  if (isAttendanceSyncConfigured) {
+  if (shouldUseSharedAttendance(email)) {
     await ensureSharedAttendanceReady(email)
     const profile = await fetchStudentProfile(email)
     const saved = await createSharedSubject({
@@ -300,7 +678,7 @@ export async function updateSubject(
   email: string,
   subject: Subject,
 ): Promise<Subject> {
-  if (isAttendanceSyncConfigured) {
+  if (shouldUseSharedAttendance(email)) {
     await ensureSharedAttendanceReady(email)
     const saved = await updateSharedSubject(email, subject)
     writeSubjects(
@@ -320,7 +698,7 @@ export async function updateSubject(
 }
 
 export async function deleteSubject(email: string, subjectId: string): Promise<void> {
-  if (isAttendanceSyncConfigured) {
+  if (shouldUseSharedAttendance(email)) {
     await ensureSharedAttendanceReady(email)
     await deleteSharedSubject(email, subjectId)
   }
@@ -346,15 +724,25 @@ function readRecords(email: string): AttendanceRecord[] {
   return isArrayOfObjects<AttendanceRecord>(value) ? value : []
 }
 
+export function hasLocalAttendanceRecord(
+  studentEmail: string,
+  subjectId: string,
+  date: string,
+): boolean {
+  return readRecords(studentEmail).some(
+    (record) => record.subjectId === subjectId && record.date === date,
+  )
+}
+
 export async function fetchAttendanceRecords(
   email: string,
 ): Promise<AttendanceRecord[]> {
-  if (isAttendanceSyncConfigured) {
+  if (shouldUseSharedAttendance(email)) {
     try {
       await ensureSharedAttendanceReady(email)
       const records = await fetchSharedRecords(email)
       return records.sort((a, b) => b.date.localeCompare(a.date))
-    } catch {
+    } catch (error) {
       // Offline or schema not applied yet — keep the local cache usable.
     }
   }
@@ -370,7 +758,7 @@ export async function logAttendance(
 ): Promise<Subject | null> {
   const recordId = makeId('att')
 
-  if (isAttendanceSyncConfigured) {
+  if (shouldUseSharedAttendance(email)) {
     await ensureSharedAttendanceReady(email)
     const subject = await logSharedAttendance({
       studentEmail: email,
@@ -411,16 +799,101 @@ export async function logAttendance(
   return updated
 }
 
+export async function confirmLocalStaffAttendance(
+  staffEmail: string,
+  studentEmail: string,
+  subjectId: string,
+  date: string,
+): Promise<void> {
+  const staff = getAccount(staffEmail)
+  const student = getAccount(studentEmail)
+  const session = await getSession()
+  if (
+    !staff ||
+    staff.role !== 'staff' ||
+    session?.role !== 'staff' ||
+    session.email !== staff.email
+  ) {
+    throw new Error('A signed-in local staff account is required to confirm attendance.')
+  }
+  if (!student || student.role !== 'student') {
+    throw new Error('The student does not exist in this browser’s local account list.')
+  }
+  const studentProfile = await fetchStudentProfile(student.email)
+  if (studentProfile.verificationStatus !== 'verified') {
+    throw new Error('Only verified students can be marked present through camera attendance.')
+  }
+  const parsedDate = /^\d{4}-\d{2}-\d{2}$/.test(date)
+    ? new Date(`${date}T00:00:00.000Z`)
+    : null
+  if (!parsedDate || !Number.isFinite(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== date) {
+    throw new Error('Choose a valid attendance date.')
+  }
+
+  const studentSubject = readSubjects(student.email).find((item) => item.id === subjectId)
+  if (!studentSubject) throw new Error('The student is not enrolled in this subject.')
+  const staffProfile = await fetchStaffProfile(staff.email)
+  const isAssigned = staffProfile.subjects.some(
+    (subject) => subjectKey(subject.name, subject.code) === subjectKey(studentSubject.name, studentSubject.code),
+  )
+  if (!isAssigned) throw new Error('This subject is not assigned to the staff account.')
+
+  const save = () => {
+    const records = readRecords(student.email)
+    if (records.some((record) => record.subjectId === subjectId && record.date === date)) {
+      throw new Error('Attendance has already been recorded for this student, subject, and date.')
+    }
+
+    const subjects = readSubjects(student.email)
+    const currentSubject = subjects.find((item) => item.id === subjectId)
+    if (!currentSubject) throw new Error('The student is no longer enrolled in this subject.')
+    const record: AttendanceRecord = {
+      id: makeId('att'),
+      subjectId,
+      date,
+      status: 'present',
+      source: 'staff_confirmed',
+    }
+    const updatedSubject: Subject = {
+      ...currentSubject,
+      held: currentSubject.held + 1,
+      attended: currentSubject.attended + 1,
+    }
+    writeStoresOrThrow([
+      [dataKey(student.email, 'attendance.records'), [record, ...records]],
+      [
+        dataKey(student.email, 'subjects'),
+        subjects.map((item) => (item.id === subjectId ? updatedSubject : item)),
+      ],
+    ])
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.locks) {
+    await navigator.locks.request(
+      `attendpro.attendance.${student.email}.${subjectId}.${date}`,
+      save,
+    )
+  } else {
+    save()
+  }
+}
+
 /** Lets staff correct a student's counters — the student sees it on next read. */
 export async function setSubjectCounters(
   studentEmail: string,
   subjectId: string,
   held: number,
   attended: number,
+  reason: string,
 ): Promise<Subject | null> {
-  if (isAttendanceSyncConfigured) {
-    await ensureSharedAttendanceReady(studentEmail)
-    const saved = await setSharedSubjectCounters(studentEmail, subjectId, held, attended)
+  if (shouldUseSharedAttendance(studentEmail)) {
+    const saved = await correctOfficialAttendanceCounters(
+      studentEmail,
+      subjectId,
+      held,
+      attended,
+      reason,
+    )
     writeSubjects(
       studentEmail,
       readSubjects(studentEmail).map((item) =>
@@ -593,10 +1066,16 @@ export async function fetchStaffProfile(email: string): Promise<StaffProfile> {
     subjects: [],
   })
 
-  // A staff account that is new to this device has no local subjects. Pull the
-  // shared list instead of letting the next sync delete the server-side roster
-  // scope. A non-empty local profile always wins (it is the newer edit).
-  if (isAttendanceSyncConfigured && email && local.subjects.length === 0) {
+  // The trusted platform assignment list, not this editable local profile,
+  // determines the subjects that can scope attendance operations.
+  if (shouldUseSharedAttendance(email) && email) {
+    const shared = await fetchSharedStaffSubjects(email)
+    const hydrated: StaffProfile = { ...local, subjects: shared }
+    writeStore(dataKey(email, 'staffProfile'), hydrated)
+    return hydrated
+  }
+
+  if (shouldUseSharedAttendance(email) && email && local.subjects.length === 0) {
     try {
       const shared = await fetchSharedStaffSubjects(email)
       if (shared.length > 0) {
@@ -616,19 +1095,11 @@ export async function saveStaffProfile(
   email: string,
   profile: StaffProfile,
 ): Promise<StaffProfile> {
-  writeStore(dataKey(email, 'staffProfile'), profile)
-
-  // Mirror taught subjects to the shared database so the roster query can be
-  // scoped server-side. Best-effort: the roster fetch retries this.
-  if (isAttendanceSyncConfigured) {
-    try {
-      await syncStaffSubjects(email, profile.subjects)
-    } catch {
-      // Retried by fetchStaffRoster.
-    }
-  }
-
-  return profile
+  const saved = shouldUseSharedAttendance(email)
+    ? { ...profile, subjects: await fetchSharedStaffSubjects(email) }
+    : profile
+  writeStore(dataKey(email, 'staffProfile'), saved)
+  return saved
 }
 
 function readActivities(email: string): AcademicActivity[] {
@@ -817,8 +1288,11 @@ async function rosterFromLocal(email: string): Promise<{
         studentEmail: student.email,
         studentName: studentProfile.fullName || student.fullName,
         studentId: studentProfile.studentId || '-',
-        department: studentProfile.course || studentProfile.institution || '-',
+        department: studentProfile.department || studentProfile.course || studentProfile.institution || '-',
         year: studentProfile.year || '-',
+        rollNumber: studentProfile.rollNumber || '-',
+        section: studentProfile.section || '-',
+        verificationStatus: studentProfile.verificationStatus ?? 'not_submitted',
         subjectId: subject.id,
         subjectName: subject.name,
         subjectCode: subject.code,
@@ -845,12 +1319,10 @@ export async function fetchStaffRoster(email: string): Promise<{
 }> {
   const profile = await fetchStaffProfile(email)
 
-  if (isAttendanceSyncConfigured) {
+  if (shouldUseSharedAttendance(email)) {
     let sharedError: unknown
 
     try {
-      // Scope the server-side roster query to what this staff member teaches.
-      await syncStaffSubjects(email, profile.subjects)
       const sharedRows = await fetchStaffAttendanceRows(email)
       return rosterFromSharedRows(profile, sharedRows)
     } catch (error) {

@@ -107,6 +107,7 @@ export function useAttendance(email: string | undefined) {
   return {
     summary,
     records: recordsQuery.data ?? EMPTY_RECORDS,
+    error: subjectsQuery.error ?? recordsQuery.error,
     isLoading:
       subjectsQuery.isLoading || recordsQuery.isLoading,
     isError:

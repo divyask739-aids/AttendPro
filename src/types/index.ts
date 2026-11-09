@@ -7,9 +7,13 @@ export interface UserAccount {
   fullName: string
   role: UserRole
   createdAt: string
+  passwordSalt?: string
+  passwordHash?: string
+  passwordIterations?: number
 }
 
 export interface Session {
+  id: string
   email: string
   fullName: string
   role: UserRole
@@ -26,16 +30,39 @@ export interface StudentProfile {
   course: string
   year: string
   semester: string
+  department?: string
+  rollNumber?: string
+  section?: string
+  verificationStatus?: StudentVerificationStatus
+  verificationNote?: string
+  verificationReviewedBy?: string
+  verificationReviewedAt?: string
+  verifiedAt?: string
   /** Minutes the student can study per day (drives Today's Plan) */
   dailyStudyMinutes: number
 }
 
+export type StudentVerificationStatus =
+  | 'not_submitted'
+  | 'pending'
+  | 'verified'
+  | 'rejected'
+
+export interface StudentVerificationRecord {
+  email: string
+  fullName: string
+  studentId: string
+  rollNumber: string
+  department: string
+  year: string
+  section: string
+  status: StudentVerificationStatus
+  note: string
+}
+
 export type AttendanceStatus = 'present' | 'absent' | 'late' | 'cancelled'
 
-/**
- * A live attendance session created by staff. Sessions are stored in the
- * shared Supabase database so students on any device can check in.
- */
+/** A live attendance session. Shared live sessions require the configured backend. */
 export interface AttendanceSession {
   id: string
   code: string
@@ -80,7 +107,15 @@ export interface AttendanceRecord {
   /** ISO date string */
   date: string
   status: AttendanceStatus
+  source?: AttendanceRecordSource
 }
+
+export type AttendanceRecordSource =
+  | 'manual'
+  | 'live'
+  | 'personal'
+  | 'legacy_import'
+  | 'staff_confirmed'
 
 export type TaskPriority = 'low' | 'medium' | 'high'
 export type TaskStatus = 'todo' | 'in_progress' | 'done' | 'missed'
@@ -135,6 +170,9 @@ export interface StudentAttendanceRow {
   studentId: string
   department: string
   year: string
+  rollNumber?: string
+  section?: string
+  verificationStatus?: StudentVerificationStatus
   subjectId: string
   subjectName: string
   subjectCode: string

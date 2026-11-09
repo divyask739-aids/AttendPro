@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { Card } from '@/components/ui/Card'
+import { isLocalAccount } from '@/lib/dataApi'
 import {
   useAuthMutations,
   useProfileMutations,
@@ -62,12 +63,12 @@ function StudentProfileForm({ email }: { email: string }) {
         <Field id="sp-email" label="Email" hint="Your account email">
           <input id="sp-email" value={form.email} disabled className={cn(inputClass, 'bg-slate-50')} />
         </Field>
-        <Field id="sp-id" label="Student ID">
+        <Field id="sp-id" label="Student ID" hint="Generated for your account and used by the staff QR scanner">
           <input
             id="sp-id"
             value={form.studentId}
-            onChange={(e) => setForm({ ...form, studentId: e.target.value })}
-            className={inputClass}
+            readOnly
+            className={cn(inputClass, 'bg-slate-50')}
           />
         </Field>
         <Field id="sp-inst" label="Institution">
@@ -90,8 +91,8 @@ function StudentProfileForm({ email }: { email: string }) {
           <input
             id="sp-year"
             value={form.year}
-            onChange={(e) => setForm({ ...form, year: e.target.value })}
-            className={inputClass}
+            readOnly
+            className={cn(inputClass, 'bg-slate-50')}
           />
         </Field>
         <Field id="sp-sem" label="Semester">
@@ -136,6 +137,7 @@ function StaffProfileForm({ email }: { email: string }) {
     code: '',
     semester: '',
   })
+  const canEditAssignments = isLocalAccount(email)
 
   useEffect(() => {
     if (profile) setForm(profile)
@@ -146,7 +148,11 @@ function StaffProfileForm({ email }: { email: string }) {
   return (
     <FormShell
       title="Staff Profile"
-      description="Your teaching subjects decide which students and attendance data you can see."
+      description={
+        canEditAssignments
+          ? 'Add the subjects you teach to manage attendance and activities.'
+          : 'Your teaching assignments are provisioned by a trusted AttendPro platform administrator.'
+      }
       onSubmit={async (event) => {
         event.preventDefault()
         await saveStaff.mutateAsync(form)
@@ -203,15 +209,18 @@ function StaffProfileForm({ email }: { email: string }) {
       </div>
 
       <div className="mt-5 border-t border-slate-100 pt-4">
-        <h3 className="text-sm font-semibold text-slate-900">Subjects you teach</h3>
+        <h3 className="text-sm font-semibold text-slate-900">Subject assignments</h3>
         <p className="mt-0.5 text-xs text-slate-500">
-          Only students enrolled in these subjects appear in your dashboard.
+          {canEditAssignments
+            ? 'Use the same subject name and code as student accounts to build the local roster.'
+            : 'These platform-approved assignments determine which student attendance records you can access. Contact an AttendPro platform administrator to request a change.'}
         </p>
 
         <ul className="mt-3 space-y-2">
           {form.subjects.map((subject, index) => (
             <li key={`${subject.name}-${index}`} className="flex items-center gap-2">
               <input
+                disabled={!canEditAssignments}
                 value={subject.name}
                 onChange={(e) => {
                   const next = [...form.subjects]
@@ -223,6 +232,7 @@ function StaffProfileForm({ email }: { email: string }) {
                 aria-label="Subject name"
               />
               <input
+                disabled={!canEditAssignments}
                 value={subject.code}
                 onChange={(e) => {
                   const next = [...form.subjects]
@@ -234,6 +244,7 @@ function StaffProfileForm({ email }: { email: string }) {
                 aria-label="Subject code"
               />
               <input
+                disabled={!canEditAssignments}
                 value={subject.semester}
                 onChange={(e) => {
                   const next = [...form.subjects]
@@ -246,6 +257,7 @@ function StaffProfileForm({ email }: { email: string }) {
               />
               <button
                 type="button"
+                disabled={!canEditAssignments}
                 onClick={() =>
                   setForm({ ...form, subjects: form.subjects.filter((_, i) => i !== index) })
                 }
@@ -259,6 +271,7 @@ function StaffProfileForm({ email }: { email: string }) {
 
         <div className="mt-3 flex flex-wrap items-end gap-2">
           <input
+            disabled={!canEditAssignments}
             value={newSubject.name}
             onChange={(e) => setNewSubject({ ...newSubject, name: e.target.value })}
             placeholder="New subject"
@@ -266,6 +279,7 @@ function StaffProfileForm({ email }: { email: string }) {
             aria-label="New subject name"
           />
           <input
+            disabled={!canEditAssignments}
             value={newSubject.code}
             onChange={(e) => setNewSubject({ ...newSubject, code: e.target.value })}
             placeholder="Code"
@@ -273,6 +287,7 @@ function StaffProfileForm({ email }: { email: string }) {
             aria-label="New subject code"
           />
           <input
+            disabled={!canEditAssignments}
             value={newSubject.semester}
             onChange={(e) => setNewSubject({ ...newSubject, semester: e.target.value })}
             placeholder="Sem"
@@ -281,6 +296,7 @@ function StaffProfileForm({ email }: { email: string }) {
           />
           <button
             type="button"
+            disabled={!canEditAssignments || !newSubject.name.trim()}
             onClick={() => {
               if (!newSubject.name.trim()) return
               setForm({ ...form, subjects: [...form.subjects, newSubject] })
@@ -309,12 +325,23 @@ function FormShell({
   title: string
   description: string
   children: React.ReactNode
-  onSubmit: (event: React.FormEvent) => void
+  onSubmit: (event: React.FormEvent) => void | Promise<void>
   saving: boolean
   saved: boolean
 }) {
   const { session } = useSession()
   const { logout } = useAuthMutations()
+  const [submitError, setSubmitError] = useState<string | null>(null)
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault()
+    setSubmitError(null)
+    try {
+      await onSubmit(event)
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : 'Could not save your profile.')
+    }
+  }
 
   return (
     <div>
@@ -325,7 +352,7 @@ function FormShell({
 
       <div className="mt-4 space-y-4">
         <Card>
-          <form onSubmit={onSubmit}>
+          <form onSubmit={(event) => void handleSubmit(event)}>
             {children}
             <button
               type="submit"
@@ -336,6 +363,11 @@ function FormShell({
             </button>
             {saved && (
               <p className="ml-3 inline text-xs font-medium text-emerald-600">Saved</p>
+            )}
+            {submitError && (
+              <p role="alert" className="mt-3 text-sm text-rose-700">
+                {submitError}
+              </p>
             )}
           </form>
         </Card>

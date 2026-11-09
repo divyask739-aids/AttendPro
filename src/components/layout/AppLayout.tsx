@@ -45,11 +45,19 @@ export function AppLayout() {
       </aside>
 
       <div className="lg:pl-64">
-        <header className="sticky top-0 z-10 border-b border-slate-200 bg-white/80 px-4 py-3 backdrop-blur lg:hidden">
-          <p className="text-sm font-bold tracking-tight text-slate-900">
-            AttendPro · {isStaff ? 'Faculty' : 'Student'}
-          </p>
-        </header>
+        <header className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white/80 px-4 py-3 backdrop-blur lg:hidden">
+  <p className="text-sm font-bold tracking-tight text-slate-900">
+    AttendPro · {isStaff ? 'Faculty' : 'Student'}
+  </p>
+
+  <button
+    type="button"
+    onClick={() => void logout.mutate()}
+    className="rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-100"
+  >
+    Sign out
+  </button>
+</header>
         <main className="mx-auto w-full max-w-5xl px-4 pb-24 pt-6 lg:px-8 lg:pb-12 lg:pt-8">
           {/* Keying by pathname replays the entrance animation on each route change. */}
           <div key={location.pathname} className="page-enter">
@@ -62,7 +70,7 @@ export function AppLayout() {
         aria-label="Primary"
         className="fixed inset-x-0 bottom-0 z-20 border-t border-slate-200 bg-white/95 backdrop-blur lg:hidden"
       >
-        <div className="mx-auto grid max-w-md grid-cols-5 px-2 pb-[env(safe-area-inset-bottom)]">
+        <div className="mx-auto flex max-w-5xl overflow-x-auto px-2 pb-[env(safe-area-inset-bottom)]">
           <NavLinks role={role} variant="bottom" />
         </div>
       </nav>

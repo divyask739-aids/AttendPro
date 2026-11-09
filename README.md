@@ -1,39 +1,53 @@
 # AttendPro
 
-AttendPro is a digital student management platform that helps students track their attendance, academic activities, tasks, and productivity in one place. It provides an easy way to monitor attendance and stay organized with daily academic goals.
+AttendPro is an independent student–staff platform for attendance, academic
+activities, tasks, reminders, goals, planning, and productivity.
 
-## Live attendance (cross-device)
+## Architecture
 
-Staff can start a live attendance session for a subject and share the generated
-code. Students check in from any phone; the staff list updates automatically via
-Supabase Realtime (with polling fallback), and duplicate/invalid/expired codes
-are rejected by the database.
+- React 19, TypeScript, Vite, Tailwind CSS, and React Router.
+- Accounts, profiles, subjects, attendance, tasks, goals, planner, and activities
+  use the existing email-namespaced `localStorage` architecture. Browser-local
+  data does not sync to other devices.
+- Camera attendance uses local MediaPipe face detection and QR scanning. Faces
+  are never recognized or matched to identities; frames are not stored or
+  uploaded. Staff manually verify students and confirm attendance.
+- Local authentication stores salted PBKDF2 password hashes, not plaintext
+  passwords. Browser storage and client-side roles remain user-editable and are
+  not secure authentication for production.
+- The repository retains separate legacy Supabase sync code for cross-device
+  live attendance. The local camera attendance flow does not use it.
 
-A check-in also writes into the shared attendance model (`attendance_subjects` /
-`attendance_records`), so the Attendance page, both dashboards and the staff
-roster show the same percentages. A valid class code is the authorization to
-join: the first successful check-in enrolls the student in that class's subject,
-so staff see students who joined with the code even if the student never added
-the subject manually. Duplicate codes/check-ins never increase the roster count.
+## Development
 
-Setup, schema upgrade notes, security policies and two-phone test steps:
-[docs/attendance-sync-setup.md](docs/attendance-sync-setup.md).
+Install the existing dependencies, then run the app:
 
-Quick start:
-
-```bash
-cp .env.example .env.local   # add your Supabase URL + anon key
-# run supabase/schema.sql in the Supabase SQL editor (re-run it if upgrading)
+```powershell
 npm install
 npm run dev
 ```
 
-## Scripts
+The Vite base path is `/AttendPro/` for the GitHub Pages site. `public/404.html`
+provides a SPA fallback for deep links. Camera access requires HTTPS or
+localhost. For camera details and local limitations, see
+[Camera attendance and local account limitations](docs/camera-attendance.md).
 
-```bash
-npm run dev        # local development
-npm run typecheck  # TypeScript checks
-npm run build      # production build
-npm run preview    # preview the build
-npm run deploy     # publish dist/ to GitHub Pages
+## Setup and operations
+
+- [Legacy shared attendance setup](docs/attendance-sync-setup.md)
+
+Supabase is not required for account registration or camera attendance. Existing
+Supabase accounts cannot be transparently converted to local accounts; accounts
+and data are specific to one browser profile and device.
+
+## Validation and deployment
+
+```powershell
+npm run typecheck
+npm run build
+git diff --check
 ```
+
+These checks do not replace browser/device camera testing. The configured
+`npm run deploy` script publishes `dist/` to GitHub Pages; run it only after
+review and explicit approval.

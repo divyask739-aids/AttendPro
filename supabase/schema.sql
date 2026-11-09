@@ -1,21 +1,16 @@
 -- ===================================================================
 -- AttendPro · cross-device live attendance
 --
--- Run this whole file once in the Supabase SQL editor
--- (Dashboard → SQL Editor → New query → paste → Run).
--- It is safe to run again: tables use IF NOT EXISTS and functions are
--- replaced.
+-- Apply this bootstrap file before the versioned Auth/security migrations.
+-- Do not rerun it after the hardening migration: it replaces secure RPC
+-- wrappers with bootstrap definitions and revokes their execution grants.
 --
--- Design notes
---   * Tables are NOT readable/writable with the public anon key.
---   * Every operation goes through a SECURITY DEFINER function that
---     validates the session code, open/expiry state and duplicates in
---     the database (the single source of truth).
---   * Students can only insert their own check-in through RPC.
---   * Staff can only read/close sessions whose staff_email they pass
---     and which match the session row.
---   * A database trigger broadcasts new check-ins over Supabase
---     Realtime. The frontend also polls every 4 s as a fallback.
+-- Security note
+--   * This is the attendance bootstrap schema, not the authorization upgrade.
+--   * RPC execution is revoked below. Apply the ordered Supabase Auth
+--     migrations before enabling the application.
+--   * The hardening migration restores only the authenticated, role-scoped RPCs.
+--   * Realtime broadcasts and frontend polling remain optional refresh paths.
 -- ===================================================================
 
 create extension if not exists pgcrypto;
@@ -162,6 +157,9 @@ as $$
     else public.normalize_subject(p_code) || ':' || public.normalize_subject(p_name)
   end;
 $$;
+
+revoke all on function public.normalize_subject(text) from public, anon, authenticated;
+revoke all on function public.attendance_subject_key(text, text) from public, anon, authenticated;
 
 -- -------------------------------------------------------------------
 -- Code generation
@@ -1035,44 +1033,27 @@ create or replace function public.broadcast_attendance_checkin()
 returns trigger
 language plpgsql
 security definer
-set search_path = public, realtime
+set search_path = ''
 as $$
 begin
-  begin
-    perform realtime.broadcast_changes(
-      'attendance-session-' || new.session_id::text,
-      'check_in',
-      'INSERT',
-      'attendance_checkins',
-      'public',
-      new,
-      null::record
-    );
-  exception
-    when others then
-      null;
-  end;
-
-  begin
-    -- Global signal so staff dashboards can refresh their roster.
-    perform realtime.broadcast_changes(
-      'attendance-updates',
-      'check_in',
-      'INSERT',
-      'attendance_checkins',
-      'public',
-      new,
-      null::record
-    );
-  exception
-    when others then
-      -- Never block a check-in because Realtime is unavailable.
-      null;
-  end;
+  perform realtime.send(
+    jsonb_build_object('session_id', new.session_id),
+    'check_in',
+    'attendance-session-' || new.session_id::text,
+    false
+  );
+  perform realtime.send(
+    jsonb_build_object('session_id', new.session_id),
+    'check_in',
+    'attendance-updates',
+    false
+  );
 
   return new;
 end;
 $$;
+revoke all on function public.broadcast_attendance_checkin()
+  from public, anon, authenticated;
 
 drop trigger if exists attendance_checkin_broadcast on public.attendance_checkins;
 
@@ -1084,23 +1065,24 @@ for each row execute function public.broadcast_attendance_checkin();
 -- Permissions
 -- -------------------------------------------------------------------
 
-grant execute on function public.create_attendance_session(text, text, text, integer) to anon, authenticated;
-grant execute on function public.get_staff_attendance_sessions(text, integer) to anon, authenticated;
-grant execute on function public.get_attendance_checkins(uuid, text) to anon, authenticated;
-grant execute on function public.close_attendance_session(uuid, text) to anon, authenticated;
-grant execute on function public.get_attendance_session(text) to anon, authenticated;
-grant execute on function public.check_in_attendance(text, text, text, text) to anon, authenticated;
-grant execute on function public.generate_attendance_code() to anon, authenticated;
-
-grant execute on function public.sync_staff_attendance_subjects(text, jsonb) to anon, authenticated;
-grant execute on function public.get_staff_attendance_subjects(text) to anon, authenticated;
-grant execute on function public.get_staff_attendance(text) to anon, authenticated;
-grant execute on function public.import_student_attendance(text, text, text, text, text, jsonb, jsonb) to anon, authenticated;
-grant execute on function public.update_attendance_identity(text, text, text, text, text) to anon, authenticated;
-grant execute on function public.create_attendance_subject(text, jsonb, text, text, text, text) to anon, authenticated;
-grant execute on function public.update_attendance_subject(text, jsonb) to anon, authenticated;
-grant execute on function public.delete_attendance_subject(text, text) to anon, authenticated;
-grant execute on function public.log_attendance_class(text, text, text, date, text) to anon, authenticated;
-grant execute on function public.set_attendance_counters(text, text, integer, integer) to anon, authenticated;
-grant execute on function public.get_student_attendance_subjects(text) to anon, authenticated;
-grant execute on function public.get_student_attendance_records(text) to anon, authenticated;
+revoke all on function public.create_attendance_session(text, text, text, integer) from public, anon, authenticated;
+revoke all on function public.get_staff_attendance_sessions(text, integer) from public, anon, authenticated;
+revoke all on function public.get_attendance_checkins(uuid, text) from public, anon, authenticated;
+revoke all on function public.close_attendance_session(uuid, text) from public, anon, authenticated;
+revoke all on function public.get_attendance_session(text) from public, anon, authenticated;
+revoke all on function public.check_in_attendance(text, text, text, text) from public, anon, authenticated;
+revoke all on function public.generate_attendance_code() from public, anon, authenticated;
+revoke all on function public.normalize_subject(text) from public, anon, authenticated;
+revoke all on function public.attendance_subject_key(text, text) from public, anon, authenticated;
+revoke all on function public.sync_staff_attendance_subjects(text, jsonb) from public, anon, authenticated;
+revoke all on function public.get_staff_attendance_subjects(text) from public, anon, authenticated;
+revoke all on function public.get_staff_attendance(text) from public, anon, authenticated;
+revoke all on function public.import_student_attendance(text, text, text, text, text, jsonb, jsonb) from public, anon, authenticated;
+revoke all on function public.update_attendance_identity(text, text, text, text, text) from public, anon, authenticated;
+revoke all on function public.create_attendance_subject(text, jsonb, text, text, text, text) from public, anon, authenticated;
+revoke all on function public.update_attendance_subject(text, jsonb) from public, anon, authenticated;
+revoke all on function public.delete_attendance_subject(text, text) from public, anon, authenticated;
+revoke all on function public.log_attendance_class(text, text, text, date, text) from public, anon, authenticated;
+revoke all on function public.set_attendance_counters(text, text, integer, integer) from public, anon, authenticated;
+revoke all on function public.get_student_attendance_subjects(text) from public, anon, authenticated;
+revoke all on function public.get_student_attendance_records(text) from public, anon, authenticated;

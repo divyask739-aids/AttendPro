@@ -2,13 +2,14 @@ import { useMemo, useState } from 'react'
 
 import { RecommendationsCard } from '@/components/RecommendationsCard'
 import { AttendanceLogger } from '@/features/attendance/components/AttendanceLogger'
+import { AttendanceNotifications } from '@/features/attendance/components/AttendanceNotifications'
 import { StudentCheckIn } from '@/features/attendance/components/StudentCheckIn'
 import { SubjectManager } from '@/features/attendance/components/SubjectManager'
 import { useAttendance } from '@/hooks/useAttendance'
 import { useRecommendations } from '@/hooks/useRecommendations'
 
 export function AttendancePage({ email }: { email: string }) {
-  const { summary, isLoading, isError } = useAttendance(email)
+  const { summary, isLoading, isError, error } = useAttendance(email)
   const { recommendations } = useRecommendations(email)
 
   const [tab, setTab] = useState<'record' | 'manage'>('record')
@@ -31,6 +32,11 @@ export function AttendancePage({ email }: { email: string }) {
       </header>
 
       <StudentCheckIn email={email} />
+      <AttendanceNotifications email={email} />
+      <p className="text-xs leading-5 text-slate-500">
+        Attendance totals may include your personal or imported entries. Only records labeled
+        “Official · staff confirmed” are staff-verified.
+      </p>
 
       {isLoading ? (
         <p className="mt-6 text-sm text-slate-500">
@@ -41,7 +47,9 @@ export function AttendancePage({ email }: { email: string }) {
           role="alert"
           className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700"
         >
-          Unable to load attendance data. Please try again.
+          {error instanceof Error
+            ? `Unable to load attendance data. ${error.message}`
+            : 'Unable to load attendance data. Please try again.'}
         </div>
       ) : (
         <>

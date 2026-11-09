@@ -14,12 +14,10 @@ const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim() ?? ''
 export const isAttendanceSyncConfigured = Boolean(url && anonKey)
 
 export const ATTENDANCE_SETUP_MESSAGE =
-  'Live attendance is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY, then apply supabase/schema.sql.'
+  'Shared live attendance is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY, then apply the legacy attendance schema and migrations.'
 
 export const supabase: SupabaseClient | null = isAttendanceSyncConfigured
-  ? createClient(url, anonKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    })
+  ? createClient(url, anonKey)
   : null
 
 export function requireSupabase(): SupabaseClient {

@@ -1,5 +1,10 @@
 # Shared attendance across devices
 
+> This guide describes the separate legacy Supabase-backed live attendance
+> implementation. The staff camera/QR workflow uses local AttendPro dataApi and
+> browser storage instead; it does not depend on these setup steps. See
+> [camera attendance and student verification](./camera-attendance.md).
+
 AttendPro's original attendance data lived only in `localStorage`, which is why
 a staff phone could never see a check-in made on a student phone, and why every
 device showed its own "0 students enrolled".
@@ -15,27 +20,50 @@ instead of per-browser storage. `localStorage` remains a cache/fallback.
 | --- | --- |
 | Staff starts a session (subject + code) | `attendance_sessions` |
 | Student enters a code | `attendance_checkins` |
-| Student subject/enrollment (one row = one enrollment) | `attendance_subjects` |
+| Student subject claim | `attendance_subjects` |
+| Pending/approved enrollment | `attendpro_student_enrollments` |
 | A logged class (manual or live) | `attendance_records` |
-| Subjects a staff member teaches | `attendance_staff_subjects` |
+| Legacy staff subject cache | `attendance_staff_subjects` |
+| Trusted staff assignments | `attendpro_staff_subject_assignments` |
+| Student-facing attendance updates | `attendance_notifications` |
 | Profiles, tasks, goals, planner | Unchanged (`localStorage`) |
 
-Enrollment is a row in `attendance_subjects`. **A valid live class code is the
-authorization to join:** the first successful check-in enrolls the student in
-exactly the subject named by that session (and reuses their existing enrollment
-if they already have one). That is why a student who only knows the code still
-appears on the staff roster — no manual "add subject" step is required.
+`attendance_subjects` stores the student's subject claim; the
+`attendpro_student_enrollments` relation tracks pending/approved enrollment.
+A valid code creates a pending claim only for a verified student and a session
+backed by an administrator-approved staff assignment. The code check-in does
+not create official attendance. Staff must verify the student, for example in
+the camera roster, to approve enrollment and record official attendance.
+The camera uses MediaPipe to draw face boxes and show a count only. It does not
+recognize people, match faces to accounts, create biometric templates, or save
+or transmit camera frames. The roster and staff member's manual decision are
+the only attendance confirmation path.
 
-A check-in writes **two** linked rows in one transaction:
+A successful code check-in creates or reuses the student's subject claim,
+creates a pending enrollment, and writes linked check-in/history rows in one
+transaction:
 
-1. `attendance_checkins` — who checked in, roll number, time (live panel).
-2. `attendance_records` with `source = 'live'` and `session_id` — so the
-   Attendance page, Dashboard percentages and staff roster all update.
+1. `attendance_subjects` / `attendpro_student_enrollments` — the pending claim.
+2. `attendance_records` — a `personal` (unverified) record.
+3. `attendance_checkins` — the code submission and its timestamp.
 
-`attendance_subjects.held` / `attended` are incremented by the same function.
-The unique indexes `(session_id, student_email)` on check-ins and
-`(session_id, student_email) WHERE session_id IS NOT NULL` on records make a
-duplicate check-in impossible at the database level.
+The database starts from the legacy RPC which writes a `live` row, then the
+authenticated wrapper changes its provenance to `personal` in the same
+transaction. This is not official attendance.
+
+Staff confirmation writes the same shared attendance model with
+`source = 'staff_confirmed'`. Student-entered, local-imported, and old live
+records remain visible to the student with provenance labels but are excluded
+from staff official totals. Staff counter corrections require a reason and are
+stored as append-only audit events.
+
+The existing code-check-in RPC increments `attendance_subjects.held` /
+`attended`; confirming an already-created check-in promotes its record without
+incrementing those counts a second time. New staff-confirmed records increment
+the totals once. The bootstrap includes email-keyed unique constraints. The
+UUID-keyed session indexes are created only when the migration finds no
+historical duplicates; ambiguous duplicate groups are preserved in review
+tables and their affected attendance operations fail closed until reviewed.
 
 ## 1. Create a Supabase project
 
@@ -45,27 +73,41 @@ duplicate check-in impossible at the database level.
    - **anon public** key → `VITE_SUPABASE_ANON_KEY`
 3. Never put the `service_role` key in the frontend or this repository.
 
-## 2. Apply / upgrade the database schema
+## 2. Apply the database schema and migrations
 
-> **If you already ran an older version of this file, run it again.** The
-> current version adds join-by-code enrollment: a valid class code enrolls the
-> student in the session's subject, and starting a class adds that subject to
-> the staff roster scope. Older schemas reject students who have not manually
-> added the subject, which shows up as "0 Students" on the staff dashboard.
+The base schema is only a bootstrap. It revokes RPC execution until the
+authentication and authorization migrations are applied. Do not rerun it after
+the hardening migrations; it is not an upgrade or rollback script.
 
-1. In Supabase, open **SQL Editor → New query**.
-2. Paste the whole of [`supabase/schema.sql`](../supabase/schema.sql) and run it.
-   It is safe to re-run (`create table if not exists`, `create or replace`,
-   `drop function if exists` for changed signatures).
-3. Confirm these tables exist under **Table Editor**:
-   `attendance_sessions`, `attendance_checkins`, `attendance_subjects`,
-   `attendance_records`, `attendance_staff_subjects`.
-4. If Supabase reports a stale function cache, reload the page or open
-   **Project Settings → API → Reload schema**.
+1. Determine whether the project has the exact legacy attendance tables and
+   RPC signatures expected by these migrations. Do not guess from table names;
+   this repository has not been validated against your live database.
+2. On a disposable Supabase project, apply
+   [`supabase/schema.sql`](../supabase/schema.sql) once only if the legacy
+   attendance schema/functions are absent. If the database already contains
+   attendance data, back it up and compare its schema/functions before doing
+   anything; `CREATE TABLE IF NOT EXISTS` does not upgrade legacy table shapes.
+3. Apply the versioned migrations in timestamp order:
+   [`20261106211500_auth_user_profiles.sql`](../supabase/migrations/20261106211500_auth_user_profiles.sql),
+   [`20261106213000_secure_attendance_and_notifications.sql`](../supabase/migrations/20261106213000_secure_attendance_and_notifications.sql),
+   then
+   [`20261106213400_attendance_integrity_and_identity.sql`](../supabase/migrations/20261106213400_attendance_integrity_and_identity.sql).
+   Do not run these in production without explicit approval.
+4. Confirm the attendance, `user_profiles`, and `attendance_notifications`
+   tables exist. In **Authentication → Providers**, enable email/password and
+   require email confirmation. Configure the Site URL and redirect allowlist
+   using [the Auth setup guide](./supabase-auth-setup.md).
+5. Bootstrap the platform owner and verify staff assignments as described in
+   the Auth guide. Resolve identity/duplicate review rows before enabling
+   affected users.
+6. Add the build-time variables below. Keep
+   `VITE_SUPABASE_AUTH_ENABLED=false` until every migration, platform
+   administrator, reviewed staff assignment, email verification, and redirect
+   setting has been configured and tested in a non-production project.
 
-The script enables RLS, removes all direct table access from the public `anon`
-role, and exposes only validated `SECURITY DEFINER` functions. It also installs
-the Realtime broadcast trigger.
+The security migrations grant only authenticated, role-checked RPCs. They
+install an opaque Realtime refresh signal (no student names/emails are
+broadcast) and deduplicated private notifications.
 
 ## 3. Configure environment variables
 
@@ -74,22 +116,32 @@ Create `.env.local` in the project root (it is already git-ignored):
 ```bash
 VITE_SUPABASE_URL=https://YOUR-PROJECT.supabase.co
 VITE_SUPABASE_ANON_KEY=YOUR-ANON-PUBLIC-KEY
+VITE_SUPABASE_AUTH_ENABLED=false
 ```
 
-Or copy `.env.example` and fill it in. These are build-time variables, so
+Or copy `.env.example` and fill it in. The anon key is public; never use a
+service-role key here. These are build-time variables, so
 re-run the build after changing them. Never commit `.env.local`.
 
 ## 4. Build and deploy the frontend (GitHub Pages)
 
 ```bash
-npm install
 npm run typecheck
 npm run build
+# Only after approval:
 npm run deploy
 ```
 
 `npm run deploy` publishes `dist/` with `gh-pages`. The Vite base path is
 already `/AttendPro/`, matching `https://divyask739-aids.github.io/AttendPro/`.
+The repository currently has no GitHub Actions deployment workflow; the npm
+script is a local deployment path and must not be run without approval.
+
+The Supabase URL and public anon key must exist at build time. Keep
+`VITE_SUPABASE_AUTH_ENABLED=false` in local/deployment environments until the
+disposable-project tests and external settings below are approved. GitHub Pages
+is static hosting and cannot protect build-time variables; never place a
+service-role key in the bundle.
 
 For CI deployments, add the same two values as **GitHub repository secrets**
 and expose them to the build step:
@@ -98,6 +150,7 @@ and expose them to the build step:
 env:
   VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
   VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+  VITE_SUPABASE_AUTH_ENABLED: ${{ vars.VITE_SUPABASE_AUTH_ENABLED }}
 ```
 
 GitHub Pages cannot run backend code; Supabase hosts the database and the
@@ -110,11 +163,10 @@ opens a page that reads attendance (Dashboard or Attendance). The upload only
 happens when the account has no shared subjects yet, so stale device caches can
 never overwrite live/manual counters.
 
-For a subject to connect a student and a staff member, **both must use the same
-subject identity**: the normalized subject code + name. When a class is started,
-the subject is added to the staff member's roster scope automatically, and the
-first student who checks in with that code is enrolled in it automatically, so
-the code alone is enough to connect them.
+For a subject to connect a student and staff member, they must use the same
+exact normalized subject identity, and the platform owner must approve that
+subject assignment for the staff account. Student claims are pending until
+staff confirms enrollment.
 
 Existing local attendance is still uploaded automatically the first time an
 account opens a page that reads attendance (Dashboard or Attendance). The upload
@@ -123,64 +175,81 @@ can never overwrite live/manual counters.
 
 ## 6. Test with two phones (end to end)
 
-1. On **Phone A**, register/log in as staff, add the taught subject in
-   **Profile**, then open **Attendance**.
-2. Pick the subject, set the duration, tap **Start session**. A 6-character code
-   appears with a countdown.
-3. On **Phone B**, log in as a student (register if needed). You do **not** need
-   to add the subject first — the class code enrolls you.
-4. Open **Attendance → Check in to class**, enter the code and roll number, tap
-   **Mark attendance**.
-5. Phone B shows "Attendance marked · you joined this class", and the subject
-   appears under the student's Attendance subjects.
-6. On Phone A the student appears within a few seconds (Realtime, with 4-second
-   polling fallback): name, roll number, check-in time and present count. A
-   green "just checked in" banner appears.
-7. On Phone B, the subject now shows one more held/attended class and the
-   Dashboard percentage updates. On Phone A, the dashboard "Students enrolled",
-   subject performance and Students/Attendance lists include the student (15 s
-   polling + broadcast).
-8. Repeat with a second student account on a third phone. Phone A's "Students
-   enrolled" count goes 1 → 2 and both students are listed.
-9. Enter the same code again on Phone B → `You have already checked in for this
-   session.` The count and percentage must **not** change.
-10. Enter a wrong code → `Invalid attendance code...` No enrollment is created.
-11. Close the session on Phone A, then try the code → `This attendance session
+1. On **Phone A**, invite/promote a staff account and have the platform owner
+   provision its subject assignment, then open **Attendance**.
+2. Pick the subject, set the duration, and tap **Start session**. A 6-character
+    code appears with a countdown.
+3. On **Phone B**, register/verify and log in as a student. In **Attendance →
+    Check in to class**, enter the code and roll number once, then tap **Mark
+    attendance**. This creates a pending enrollment and personal check-in.
+4. Phone B shows the result and the subject appears in the student's
+    attendance subjects as pending/unverified.
+5. On Phone A the student appears within a few seconds (Realtime, with 4-second
+    polling fallback): name, roll number, check-in time and present count. A
+    green "just checked in" banner appears.
+6. Staff manually verifies the student in the camera-assisted roster and
+    confirms attendance. That writes one official record and one notification;
+    the student history labels it "Official · staff confirmed".
+7. Repeat with a second student account on a third phone. Phone A's "Students
+    enrolled" count goes 1 → 2 and both students are listed.
+8. Enter the same code again on Phone B → `You have already checked in for this
+    session.` The official count must **not** change.
+9. Enter a wrong code → `Invalid attendance code...` No enrollment is created.
+10. Close the session on Phone A, then try the code → `This attendance session
     has been closed.`
-12. Refresh both phones, sign out and back in, or repeat on a new device.
+11. Refresh both phones, sign out and back in, or repeat on a new device.
     Sessions, check-ins, enrollments and percentages reload from Supabase.
+
+## Recovery and migration validation
+
+These are one-way schema changes; there is no tested down-migration. Before
+running them, take a complete Supabase backup and verify that it can be restored
+to a separate project. The migration retains original email values in
+`legacy_*_email` snapshot columns, records missing/ambiguous identity matches,
+and does not delete or merge historical rows. If execution fails or results
+need reversal, stop and restore the pre-migration backup to a separate project;
+do not rerun `schema.sql` or hand-edit production rows as a rollback.
+
+Migration execution and representative legacy-data tests have not been
+performed in this repository environment. Validate the entire sequence in a
+disposable project before considering production approval.
 
 ## Security model
 
-- Tables have RLS enabled and all privileges revoked from `anon` and
-  `authenticated`. Direct reads/writes are impossible with the public key.
-- `check_in_attendance` validates the code, the open/expired state and duplicates
-  inside Postgres, then enrolls the caller in the session's subject and writes
-  both rows atomically.
-- A student can only enroll themselves: the RPC uses the caller's own email and
-  reuses that student's existing enrollment. It never touches another student's
-  row.
-- Staff read check-ins only through `get_attendance_checkins(session_id,
-  staff_email)`, which verifies the session belongs to that email.
-- The staff roster is scoped server-side by `attendance_staff_subjects`, so a
-  staff member only receives students enrolled in subjects they teach.
-- Session creation/close and roster reads are restricted to the matching email.
+- Attendance tables have RLS enabled and direct table privileges revoked.
+  RPC execution is granted only to `authenticated` after the security
+  migration; anonymous RPC calls are denied.
+- `check_in_attendance` validates the code, open/expired state, role, verified
+  Auth identity, capacity, and duplicates. It creates a pending enrollment and
+  a personal check-in, not official attendance.
+- Student operations derive identity from `auth.uid()` and cannot target
+  another account by changing the email RPC argument.
+- Staff check-in reads validate staff role and session ownership. Roster,
+  session, and correction operations use platform-admin-approved assignments,
+  never the staff-editable legacy subject list.
+- Camera attendance uses a separate RPC that validates the staff role, open
+  session, subject assignment, and target student's verified account.
+- Notifications are unique per student/session and only the recipient can read
+  or mark them as read.
 - The public bundle only contains the anon key. No service-role key or database
   password is used by the frontend.
+- Realtime broadcasts contain only a session identifier for cache invalidation,
+  not names, emails, or roll numbers.
 
-**Known limitation:** AttendPro's existing sign-in is email-based and local to
-the device (there is no password check), so the RPCs use the caller's email as
-identity. Anyone who knows another user's email and calls the RPC directly could
-impersonate it. Direct table access is still blocked. For strict per-user
-isolation, move accounts to Supabase Auth and replace the email arguments with
-`auth.uid()` lookups.
+**Authorization requirement:** Applying `supabase/schema.sql` alone does not
+provide trusted per-user authorization. Before enabling the Auth frontend, apply
+all ordered migrations in `supabase/migrations/`. They derive identity and role
+from verified Auth sessions, provision staff subjects through platform
+administrators, and separate personal from staff-confirmed attendance. Do not
+treat frontend role guards as database authorization, and do not rerun the
+bootstrap schema after the migrations without reapplying the migrations.
 
 ## Troubleshooting
 
-- **The staff dashboard still shows 0 students** — the deployed database is
-  still on the old schema. Run the current `supabase/schema.sql` in the Supabase
-  SQL editor; older versions reject students who have not pre-added the subject.
-  After that, a student joining with the class code is enrolled automatically.
+- **The staff dashboard still shows 0 students** — verify the student joined
+  with a current class code and that the staff subject is
+  mirrored. Check database errors and confirm the ordered migrations were
+  applied.
 - **"Could not load your students"** — the shared roster query failed (offline,
   paused project or schema not applied). The app no longer shows a misleading
   "0 Students" when the shared read fails; fix the connection and refresh.
@@ -188,10 +257,24 @@ isolation, move accounts to Supabase Auth and replace the email arguments with
   to a closed session. Ask the staff member for the current code.
 - **"Shared backend not configured"** — `.env.local` is missing the two
   variables, or the build ran before they were set.
-- **"Could not find the function ... in the schema cache"** — re-run
-  `supabase/schema.sql` and reload the API schema.
+- **"Could not find the function ... in the schema cache"** — verify that the
+  ordered migrations were applied, then reload the API schema. Do not rerun
+  `supabase/schema.sql` after the hardening migration.
 - **List updates every few seconds but not instantly** — Realtime is blocked or
-  the broadcast trigger was not applied; check **Database → Publications** and
-  re-run the trigger section of the schema. Polling still works.
+  the broadcast trigger was not applied; check **Database → Publications**.
+  Polling still works. Do not rerun the bootstrap schema after hardening.
 - **Sessions disappear after redeploy** — they are in Supabase, not in the
   build; check that the deployed bundle uses the same project URL.
+
+## Known limitations and readiness
+
+- Tasks, reminders, Goals, Planner, Activities, and profile fields remain
+  browser-local; they are not synchronized across devices or protected by
+  server-side authorization.
+- Student attendance totals may include personal/imported entries; only
+  `staff_confirmed` records are counted in the staff's official roster totals.
+- Session codes are shareable bearer codes, not identity proof. Staff must
+  verify students manually. Face detection is not face recognition.
+- SQL execution and authenticated browser/device tests remain outstanding.
+  Keep Auth disabled and do not deploy this checkout as a completed migration
+  until the migration chain is validated in a disposable Supabase project.

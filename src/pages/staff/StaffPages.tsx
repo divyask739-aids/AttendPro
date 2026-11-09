@@ -7,11 +7,16 @@ import { Card, EmptyState } from '@/components/ui/Card'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { CameraAttendancePanel } from '@/features/attendance/components/CameraAttendancePanel'
 import { LiveAttendancePanel } from '@/features/attendance/components/LiveAttendancePanel'
-import { useStaffRoster, useVisibleActivities } from '@/hooks/useStaffData'
-import { createActivity, setSubjectCounters } from '@/lib/dataApi'
+import {
+  useStaffRoster,
+  useStaffStudentVerifications,
+  useStudentVerificationReview,
+  useVisibleActivities,
+} from '@/hooks/useStaffData'
+import { createActivity, isLocalAccount, setSubjectCounters } from '@/lib/dataApi'
 import { riskTone, RISK_LABEL, RISK_TONE, percentToRisk } from '@/lib/attendance'
 import { addDaysISO, isoToday } from '@/lib/date'
-import type { AcademicActivity, TaskPriority } from '@/types'
+import type { AcademicActivity, StudentVerificationStatus, TaskPriority } from '@/types'
 
 function RosterErrorNotice({ error }: { error: unknown }) {
   return (
@@ -30,12 +35,38 @@ function RosterErrorNotice({ error }: { error: unknown }) {
   )
 }
 
+function VerificationBadge({ status }: { status: StudentVerificationStatus }) {
+  const tone =
+    status === 'verified'
+      ? 'success'
+      : status === 'pending'
+        ? 'warning'
+        : status === 'rejected'
+          ? 'danger'
+          : 'neutral'
+  const label =
+    status === 'verified'
+      ? 'Verified'
+      : status === 'pending'
+        ? 'Pending'
+        : status === 'rejected'
+          ? 'Rejected'
+          : 'Not submitted'
+  return <Badge tone={tone}>{label}</Badge>
+}
+
 /* ================================================================== *
  * 1. Dashboard                                                         *
  * ================================================================== */
 
 export function StaffDashboardPage({ email }: { email: string }) {
   const { profile, subjects, rows, isLoading, isError, error } = useStaffRoster(email)
+  const {
+    records: verificationRecords,
+    isLoading: verificationsLoading,
+    isError: verificationLoadError,
+    error: verificationError,
+  } = useStaffStudentVerifications(email)
 
   if (isLoading) return <p className="text-sm text-slate-500">Loading dashboard...</p>
   if (isError) return <RosterErrorNotice error={error} />
@@ -60,9 +91,31 @@ export function StaffDashboardPage({ email }: { email: string }) {
           to="/staff/attendance"
           className="mt-3 inline-flex items-center gap-1 rounded-xl bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500"
         >
-          Start live attendance code →
+          Camera attendance →
         </Link>
       </header>
+
+      <div className="mt-5 grid gap-3 sm:grid-cols-3">
+        <Metric label="Subjects taught" value={String(subjects.length)} />
+        <Metric label="Students enrolled" value={String(enrolledStudents)} />
+        <Metric label="Average attendance" value={`${overall}%`} />
+        <Metric label="Registered students" value={verificationsLoading ? '…' : String(verificationRecords.length)} />
+        <Metric
+          label="Verified students"
+          value={verificationsLoading ? '…' : String(verificationRecords.filter((record) => record.status === 'verified').length)}
+        />
+        <Metric
+          label="Pending verification"
+          value={verificationsLoading ? '…' : String(verificationRecords.filter((record) => record.status === 'pending').length)}
+        />
+      </div>
+      {verificationLoadError && (
+        <p role="alert" className="mt-3 text-xs text-rose-700">
+          {verificationError instanceof Error
+            ? verificationError.message
+            : 'Could not load student verification counts.'}
+        </p>
+      )}
 
       {subjects.length === 0 ? (
         <div className="mt-4">
@@ -72,13 +125,6 @@ export function StaffDashboardPage({ email }: { email: string }) {
           />
         </div>
       ) : (
-        <>
-          <div className="mt-5 grid gap-3 sm:grid-cols-3">
-            <Metric label="Subjects taught" value={String(subjects.length)} />
-            <Metric label="Students enrolled" value={String(enrolledStudents)} />
-            <Metric label="Average attendance" value={`${overall}%`} />
-          </div>
-
           <div className="mt-4 space-y-4">
             <Card title="Subject performance" description="Average across enrolled students">
               <ul className="space-y-3">
@@ -118,7 +164,6 @@ export function StaffDashboardPage({ email }: { email: string }) {
               </div>
             )}
           </div>
-        </>
       )}
     </div>
   )
@@ -184,7 +229,15 @@ export function StaffSubjectsPage({ email }: { email: string }) {
 
 export function StaffStudentsPage({ email }: { email: string }) {
   const { rows, subjects, isLoading, isError, error } = useStaffRoster(email)
+  const {
+    records: verificationRecords,
+    isLoading: verificationsLoading,
+    isError: verificationsError,
+    error: verificationError,
+  } = useStaffStudentVerifications(email)
+  const { review } = useStudentVerificationReview(email)
   const [filter, setFilter] = useState('')
+  const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({})
 
   const visible = rows.filter(
     (row) =>
@@ -203,6 +256,107 @@ export function StaffStudentsPage({ email }: { email: string }) {
       </header>
 
       <div className="mt-4 space-y-4">
+        <section aria-label="Student verification review">
+          <Card title="Student verification review">
+            {verificationsLoading ? (
+              <p className="text-sm text-slate-500">Loading registered students...</p>
+            ) : verificationsError ? (
+              <p role="alert" className="text-sm text-rose-700">
+                {verificationError instanceof Error
+                  ? verificationError.message
+                  : 'Could not load student verification records.'}
+              </p>
+            ) : (
+              <>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <Metric label="Registered students" value={String(verificationRecords.length)} />
+                  <Metric
+                    label="Verified"
+                    value={String(verificationRecords.filter((record) => record.status === 'verified').length)}
+                  />
+                  <Metric
+                    label="Pending"
+                    value={String(verificationRecords.filter((record) => record.status === 'pending').length)}
+                  />
+                </div>
+                {verificationRecords.length === 0 ? (
+                  <p className="mt-4 text-sm text-slate-500">No student accounts are registered in this browser.</p>
+                ) : (
+                  <ul className="mt-4 divide-y divide-slate-100 rounded-xl border border-slate-200">
+                    {verificationRecords.map((record) => (
+                      <li key={record.email} className="flex flex-wrap items-center justify-between gap-3 p-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-slate-800">{record.fullName}</p>
+                          <p className="truncate text-xs text-slate-500">{record.email} · {record.studentId}</p>
+                          <p className="mt-1 text-xs text-slate-600">
+                            Roll {record.rollNumber || '—'} · {record.department || 'Department not set'} · Year {record.year || '—'} · Section {record.section || '—'}
+                          </p>
+                          {record.note && <p className="mt-1 text-xs text-slate-500">Staff note: {record.note}</p>}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <VerificationBadge status={record.status} />
+                          {record.status === 'pending' && (
+                            <>
+                              <input
+                                aria-label={`Review note for ${record.fullName}`}
+                                maxLength={240}
+                                value={reviewNotes[record.email] ?? ''}
+                                onChange={(event) =>
+                                  setReviewNotes((current) => ({
+                                    ...current,
+                                    [record.email]: event.target.value,
+                                  }))
+                                }
+                                placeholder="Optional review note"
+                                className="w-40 rounded-lg border border-slate-200 px-2 py-1.5 text-xs"
+                              />
+                              <button
+                                type="button"
+                                disabled={review.isPending}
+                                onClick={() =>
+                                  review.mutate({
+                                    studentEmail: record.email,
+                                    decision: 'verified',
+                                    note: reviewNotes[record.email] ?? '',
+                                  })
+                                }
+                                className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+                              >
+                                Approve
+                              </button>
+                              <button
+                                type="button"
+                                disabled={review.isPending}
+                                onClick={() =>
+                                  review.mutate({
+                                    studentEmail: record.email,
+                                    decision: 'rejected',
+                                    note: reviewNotes[record.email] ?? '',
+                                  })
+                                }
+                                className="rounded-lg border border-rose-200 px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                              >
+                                Reject
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {review.isError && (
+                  <p role="alert" className="mt-3 text-sm text-rose-700">
+                    {review.error instanceof Error
+                      ? review.error.message
+                      : 'Could not review this student verification request.'}
+                  </p>
+                )}
+              </>
+            )}
+          </Card>
+        </section>
+
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
@@ -295,12 +449,14 @@ function useCounterMutation() {
       subjectId: string
       held: number
       attended: number
+      reason: string
     }) =>
       setSubjectCounters(
         input.studentEmail,
         input.subjectId,
         input.held,
         Math.min(input.held, input.attended),
+        input.reason,
       ),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['staff-roster'] })
@@ -340,7 +496,16 @@ export function StaffAttendancePage({ email }: { email: string }) {
       </div>
 
       <div className="mt-4">
-        <LiveAttendancePanel email={email} />
+        {isLocalAccount(email) ? (
+          <Card title="Live attendance code">
+            <p className="text-sm text-slate-600">
+              Cross-device live sessions require the separately configured shared backend. Camera
+              attendance above is available locally and does not use it.
+            </p>
+          </Card>
+        ) : (
+          <LiveAttendancePanel email={email} />
+        )}
       </div>
 
       <div className="mt-4 space-y-3">
@@ -358,12 +523,13 @@ export function StaffAttendancePage({ email }: { email: string }) {
             <CounterRow
               key={`${row.studentEmail}-${row.subjectId}`}
               row={row}
-              onSave={(held, attended) =>
+              onSave={(held, attended, reason) =>
                 counter.mutate({
                   studentEmail: row.studentEmail,
                   subjectId: row.subjectId,
                   held,
                   attended,
+                  reason,
                 })
               }
             />
@@ -399,10 +565,11 @@ function CounterRow({
     attended: number
     percent: number
   }
-  onSave: (held: number, attended: number) => void
+  onSave: (held: number, attended: number, reason: string) => void
 }) {
   const [held, setHeld] = useState(row.held)
   const [attended, setAttended] = useState(row.attended)
+  const [reason, setReason] = useState('')
   const [dirty, setDirty] = useState(false)
 
   // Live check-ins update the shared counters underneath this row. Follow the
@@ -454,13 +621,27 @@ function CounterRow({
           />
         </label>
         <span className="text-sm font-bold text-slate-700">{percent}%</span>
+        <label className="min-w-52 flex-1 text-xs text-slate-600">
+          Correction reason
+          <input
+            type="text"
+            minLength={5}
+            maxLength={1000}
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="Why is this correction needed?"
+            className="mt-1 w-full rounded-xl border border-slate-200 px-2 py-1.5 text-sm"
+          />
+        </label>
         <button
           type="button"
+          disabled={reason.trim().length < 5}
           onClick={() => {
             setDirty(false)
-            onSave(held, attended)
+            onSave(held, attended, reason.trim())
+            setReason('')
           }}
-          className="rounded-xl bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white"
+          className="rounded-xl bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
         >
           Save
         </button>

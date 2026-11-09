@@ -1,113 +1,177 @@
-import { useState } from 'react'
+
+import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { zodResolver } from '@hookform/resolvers/zod'
-import { useForm } from 'react-hook-form'
-import { z } from 'zod'
 
 import { BookOpenIcon, UsersIcon } from '@/components/icons'
 import { useAuthMutations } from '@/hooks/useStudentData'
+import { fetchStudentProfile } from '@/lib/dataApi'
 import { cn } from '@/lib/utils'
 import type { UserRole } from '@/types'
 
-const schema = z
-  .object({
-    fullName: z.string().min(2, 'Enter your full name').max(80),
-    email: z.string().email('Enter a valid email'),
-    studentId: z.string().max(30).optional(),
-    staffId: z.string().max(30).optional(),
-  })
-  .refine((values) => values.fullName.trim().length > 0, {
-    message: 'Name is required',
-    path: ['fullName'],
-  })
-
-type FormValues = z.infer<typeof schema>
-
 const inputClass =
-  'w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none transition-colors focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100'
+  'w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none transition-colors focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100'
+
 const labelClass = 'mb-1 block text-xs font-medium text-slate-600'
-const errorClass = 'mt-1 text-xs text-rose-600'
 
 export function LoginPage() {
   const [role, setRole] = useState<UserRole>('student')
   const [mode, setMode] = useState<'login' | 'register'>('login')
+  const [fullName, setFullName] = useState('')
   const [email, setEmail] = useState('')
-  const [formError, setFormError] = useState<string | null>(null)
-  const { register, login } = useAuthMutations()
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [rollNumber, setRollNumber] = useState('')
+  const [department, setDepartment] = useState('')
+  const [year, setYear] = useState('')
+  const [section, setSection] = useState('')
+  const [designation, setDesignation] = useState('')
+  const [formError, setFormError] = useState('')
+  const [successMessage, setSuccessMessage] = useState('')
+
+  const { register, login, logout } = useAuthMutations()
   const navigate = useNavigate()
 
-  const {
-    register: formRegister,
-    handleSubmit,
-    formState: { errors },
-  } = useForm<FormValues>({
-    resolver: zodResolver(schema) as unknown as import('react-hook-form').Resolver<FormValues>,
-    defaultValues: { fullName: '', email: '', studentId: '', staffId: '' },
-  })
+  const destination = (userRole: UserRole) =>
+    userRole === 'staff' ? '/staff' : '/'
 
-  const destination = role === 'staff' ? '/staff' : '/'
-
-  const onLogin = async (event: React.FormEvent) => {
+  const onLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    setFormError(null)
+    setFormError('')
+    setSuccessMessage('')
+
     try {
-      await login.mutateAsync({ email, role })
-      navigate(destination, { replace: true })
+      const session = await login.mutateAsync({
+        email: email.trim(),
+        password,
+      })
+
+      if (session.role !== role) {
+        await logout.mutateAsync()
+        throw new Error(
+          `This account is registered as ${session.role}. Please select ${session.role} to log in.`,
+        )
+      }
+
+      if (session.role === 'student') {
+        const profile = await fetchStudentProfile(session.email)
+        const nextPage =
+          (profile.verificationStatus ?? 'not_submitted') === 'not_submitted'
+            ? '/verification'
+            : destination(session.role)
+        navigate(nextPage, { replace: true })
+      } else {
+        navigate(destination(session.role), { replace: true })
+      }
     } catch (error) {
-      setFormError(error instanceof Error ? error.message : 'Login failed')
+      setFormError(
+        error instanceof Error ? error.message : 'Unable to sign in.',
+      )
     }
   }
 
-  const onRegister = handleSubmit(async (values) => {
-    setFormError(null)
+  const onRegister = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setFormError('')
+    setSuccessMessage('')
+
+    if (fullName.trim().length < 2) {
+      setFormError('Please enter your full name.')
+      return
+    }
+
+    if (password.length < 6) {
+      setFormError('Password must contain at least 6 characters.')
+      return
+    }
+    if (password !== confirmPassword) {
+      setFormError('Passwords do not match.')
+      return
+    }
+
+    if (role === 'student' && [rollNumber, department, year, section].some((value) => !value.trim())) {
+      setFormError('Enter your roll number, department, year, and section.')
+      return
+    }
+    if (role === 'staff' && (!department.trim() || !designation.trim())) {
+      setFormError('Enter your department and staff designation.')
+      return
+    }
+
     try {
       await register.mutateAsync({
-        email: values.email,
-        fullName: values.fullName,
+        email: email.trim(),
+        fullName: fullName.trim(),
+        password,
         role,
-        studentId: values.studentId,
-        staffId: values.staffId,
+        rollNumber: role === 'student' ? rollNumber.trim() : undefined,
+        department: department.trim(),
+        year: role === 'student' ? year.trim() : undefined,
+        section: role === 'student' ? section.trim() : undefined,
+        designation: role === 'staff' ? designation.trim() : undefined,
       })
-      navigate(role === 'staff' ? '/profile' : '/profile', { replace: true })
+      setPassword('')
+      setConfirmPassword('')
+      setMode('login')
+      setSuccessMessage('Account created. Log in with your email and password to continue.')
     } catch (error) {
-      setFormError(error instanceof Error ? error.message : 'Registration failed')
+      setFormError(
+        error instanceof Error ? error.message : 'Unable to create account.',
+      )
     }
-  })
+  }
+
+  const onForgotPassword = () => {
+    setSuccessMessage('')
+    setFormError('Password reset is not configured. Contact your AttendPro administrator.')
+  }
+
+  const busy =
+    login.isPending ||
+    register.isPending ||
+    logout.isPending
 
   return (
     <div className="flex min-h-dvh flex-col bg-slate-100">
       <div className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center px-4 py-10">
-        <div className="animate-fade-up mb-6 flex items-center gap-3">
+        <div className="mb-6 flex items-center gap-3">
           <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-indigo-600 text-white">
             <BookOpenIcon className="h-6 w-6" />
           </span>
+
           <div>
-            <h1 className="text-xl font-bold tracking-tight text-slate-900">AttendPro</h1>
+            <h1 className="text-xl font-bold tracking-tight text-slate-900">
+              AttendPro
+            </h1>
             <p className="text-xs text-slate-500">
               Attendance + productivity + adaptive planning
             </p>
           </div>
         </div>
 
-        <div
-          className="animate-fade-up rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"
-          style={{ animationDelay: '60ms' }}
-        >
-          <div className="grid grid-cols-2 gap-2">
+        <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <h2 className="text-lg font-bold text-slate-900">
+            Welcome to AttendPro
+          </h2>
+          <p className="mt-1 text-xs text-slate-500">
+            Select your account type to continue.
+          </p>
+          {/* Student / Staff selection */}
+          <div className="mt-5 grid grid-cols-2 gap-2">
             {(['student', 'staff'] as UserRole[]).map((option) => (
               <button
                 key={option}
                 type="button"
                 onClick={() => {
                   setRole(option)
-                  setFormError(null)
+                  setFormError('')
+                  setSuccessMessage('')
                 }}
                 aria-pressed={role === option}
                 className={cn(
-                  'flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-semibold transition-colors',
+                  'flex items-center justify-center gap-2 rounded-xl px-3 py-3 text-sm font-semibold transition-colors',
                   role === option
                     ? 'bg-indigo-600 text-white'
-                    : 'border border-slate-200 bg-white text-slate-600 hover:border-slate-300',
+                    : 'border border-slate-200 bg-white text-slate-600 hover:border-indigo-300',
                 )}
               >
                 {option === 'student' ? (
@@ -120,6 +184,7 @@ export function LoginPage() {
             ))}
           </div>
 
+          {/* Login / Create account */}
           <div className="mt-4 flex gap-1 rounded-xl bg-slate-100 p-1">
             {(['login', 'register'] as const).map((option) => (
               <button
@@ -127,11 +192,14 @@ export function LoginPage() {
                 type="button"
                 onClick={() => {
                   setMode(option)
-                  setFormError(null)
+                  setFormError('')
+                  setSuccessMessage('')
                 }}
                 className={cn(
-                  'flex-1 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors',
-                  mode === option ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500',
+                  'flex-1 rounded-lg px-3 py-2 text-xs font-semibold transition-colors',
+                  mode === option
+                    ? 'bg-white text-slate-900 shadow-sm'
+                    : 'text-slate-500',
                 )}
               >
                 {option === 'login' ? 'Log in' : 'Create account'}
@@ -142,92 +210,233 @@ export function LoginPage() {
           {formError && (
             <p
               role="alert"
-              className="animate-fade-in mt-4 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-600"
+              className="mt-4 rounded-xl bg-rose-50 px-3 py-3 text-xs text-rose-600"
             >
               {formError}
             </p>
           )}
 
-          {/* Keyed by mode so switching Log in / Create account replays the entrance. */}
-          <div key={mode} className="animate-fade-up">
-            {mode === 'login' ? (
-              <form onSubmit={onLogin} className="mt-4 space-y-3" noValidate>
-                <div className="animate-fade-in" style={{ animationDelay: '20ms' }}>
-                  <label htmlFor="login-email" className={labelClass}>
-                    Email
+          {successMessage && (
+            <p
+              role="status"
+              className="mt-4 rounded-xl bg-emerald-50 px-3 py-3 text-xs text-emerald-700"
+            >
+              {successMessage}
+            </p>
+          )}
+
+          {mode === 'login' ? (
+            <form onSubmit={onLogin} className="mt-5 space-y-4">
+              <div>
+                <label htmlFor="login-email" className={labelClass}>
+                  Email address
+                </label>
+                <input
+                  id="login-email"
+                  type="email"
+                  autoComplete="email"
+                  required
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  className={inputClass}
+                />
+              </div>
+
+              <div>
+                <label htmlFor="login-password" className={labelClass}>
+                  Password
+                </label>
+                <input
+                  id="login-password"
+                  type="password"
+                  autoComplete="current-password"
+                  required
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder="Enter your password"
+                  className={inputClass}
+                />
+              </div>
+
+              <div className="text-right">
+                <button
+                  type="button"
+                  onClick={onForgotPassword}
+                  disabled={busy}
+                  className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 disabled:opacity-50"
+                >
+                  Forgot password?
+                </button>
+              </div>
+
+              <button
+                type="submit"
+                disabled={busy}
+                className="w-full rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-slate-700 disabled:opacity-60"
+              >
+                {login.isPending
+                  ? 'Signing in...'
+                  : `Log in as ${role}`}
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={onRegister} className="mt-5 space-y-4">
+              <div>
+                <label htmlFor="register-name" className={labelClass}>
+                  Full name
+                </label>
+                <input
+                  id="register-name"
+                  type="text"
+                  autoComplete="name"
+                  required
+                  minLength={2}
+                  maxLength={80}
+                  value={fullName}
+                  onChange={(event) => setFullName(event.target.value)}
+                  placeholder="Enter your full name"
+                  className={inputClass}
+                />
+              </div>
+
+              <div>
+                <label htmlFor="register-email" className={labelClass}>
+                  Email address
+                </label>
+                <input
+                  id="register-email"
+                  type="email"
+                  autoComplete="email"
+                  required
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  className={inputClass}
+                />
+              </div>
+
+              <div>
+                <label htmlFor="register-password" className={labelClass}>
+                  Create password
+                </label>
+                <input
+                  id="register-password"
+                  type="password"
+                  autoComplete="new-password"
+                  required
+                  minLength={6}
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder="Minimum 6 characters"
+                  className={inputClass}
+                />
+              </div>
+
+              <div>
+                <label htmlFor="register-confirm-password" className={labelClass}>
+                  Confirm password
+                </label>
+                <input
+                  id="register-confirm-password"
+                  type="password"
+                  autoComplete="new-password"
+                  required
+                  value={confirmPassword}
+                  onChange={(event) => setConfirmPassword(event.target.value)}
+                  placeholder="Re-enter your password"
+                  className={inputClass}
+                />
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label htmlFor="register-department" className={labelClass}>
+                    Department
                   </label>
                   <input
-                    id="login-email"
-                    type="email"
+                    id="register-department"
+                    type="text"
+                    autoComplete="organization-title"
                     required
-                    value={email}
-                    onChange={(event) => setEmail(event.target.value)}
-                    placeholder="you@college.edu"
-                    className={`${inputClass} input-anim`}
+                    maxLength={80}
+                    value={department}
+                    onChange={(event) => setDepartment(event.target.value)}
+                    className={inputClass}
                   />
                 </div>
-                <p className="text-[11px] text-slate-400">
-                  First time? Switch to "Create account" to register as a{' '}
-                  {role === 'student' ? 'student' : 'staff member'}.
-                </p>
-                <button
-                  type="submit"
-                  disabled={login.isPending}
-                  className="w-full rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-slate-700 hover:shadow-md disabled:opacity-60"
-                >
-                  {login.isPending ? 'Signing in...' : `Continue as ${role}`}
-                </button>
-              </form>
-            ) : (
-              <form onSubmit={onRegister} className="mt-4 space-y-3" noValidate>
-                <div className="animate-fade-in" style={{ animationDelay: '20ms' }}>
-                  <label htmlFor="reg-name" className={labelClass}>
-                    Full name
-                  </label>
-                  <input
-                    id="reg-name"
-                    type="text"
-                    placeholder="Ada Lovelace"
-                    className={`${inputClass} input-anim`}
-                    {...formRegister('fullName')}
-                  />
-                  {errors.fullName && <p className={errorClass}>{errors.fullName.message}</p>}
-                </div>
-                <div className="animate-fade-in" style={{ animationDelay: '70ms' }}>
-                  <label htmlFor="reg-email" className={labelClass}>
-                    Email
-                  </label>
-                  <input
-                    id="reg-email"
-                    type="email"
-                    placeholder="you@college.edu"
-                    className={`${inputClass} input-anim`}
-                    {...formRegister('email')}
-                  />
-                  {errors.email && <p className={errorClass}>{errors.email.message}</p>}
-                </div>
-                <div className="animate-fade-in" style={{ animationDelay: '120ms' }}>
-                  <label htmlFor="reg-id" className={labelClass}>
-                    {role === 'student' ? 'Student ID (optional)' : 'Staff ID (optional)'}
-                  </label>
-                  <input
-                    id="reg-id"
-                    type="text"
-                    placeholder={role === 'student' ? 'ST101' : 'FAC1024'}
-                    className={`${inputClass} input-anim`}
-                    {...formRegister(role === 'student' ? 'studentId' : 'staffId')}
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={register.isPending}
-                  className="w-full rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-indigo-500 hover:shadow-md disabled:opacity-60"
-                >
-                  {register.isPending ? 'Creating account...' : 'Create account'}
-                </button>
-              </form>
-            )}
-          </div>
+                {role === 'student' ? (
+                  <>
+                    <div>
+                      <label htmlFor="register-roll-number" className={labelClass}>
+                        Roll number
+                      </label>
+                      <input
+                        id="register-roll-number"
+                        type="text"
+                        required
+                        maxLength={32}
+                        value={rollNumber}
+                        onChange={(event) => setRollNumber(event.target.value)}
+                        className={inputClass}
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="register-year" className={labelClass}>
+                        Year
+                      </label>
+                      <input
+                        id="register-year"
+                        type="text"
+                        required
+                        maxLength={24}
+                        value={year}
+                        onChange={(event) => setYear(event.target.value)}
+                        className={inputClass}
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="register-section" className={labelClass}>
+                        Section
+                      </label>
+                      <input
+                        id="register-section"
+                        type="text"
+                        required
+                        maxLength={24}
+                        value={section}
+                        onChange={(event) => setSection(event.target.value)}
+                        className={inputClass}
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <div>
+                    <label htmlFor="register-designation" className={labelClass}>
+                      Staff designation
+                    </label>
+                    <input
+                      id="register-designation"
+                      type="text"
+                      required
+                      maxLength={80}
+                      value={designation}
+                      onChange={(event) => setDesignation(event.target.value)}
+                      className={inputClass}
+                    />
+                  </div>
+                )}
+              </div>
+
+              <button
+                type="submit"
+                disabled={busy}
+                className="w-full rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-indigo-500 disabled:opacity-60"
+              >
+                {register.isPending
+                  ? 'Creating account...'
+                  : `Create ${role} account`}
+              </button>
+            </form>
+          )}
         </div>
       </div>
     </div>
