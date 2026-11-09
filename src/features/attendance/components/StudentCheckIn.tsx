@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/Badge'
 import { Card } from '@/components/ui/Card'
 import { useCheckInMutation } from '@/hooks/useAttendanceSessions'
 import { useSession, useStudentProfile } from '@/hooks/useStudentData'
+import { isLocalAccount } from '@/lib/dataApi'
 import { ATTENDANCE_SETUP_MESSAGE, isAttendanceSyncConfigured } from '@/lib/supabase'
 import type { AttendanceCheckIn, AttendanceSession } from '@/types'
 
@@ -32,6 +33,20 @@ export function StudentCheckIn({ email }: { email: string }) {
 
   const name = profile?.fullName?.trim() || authSession?.fullName?.trim() || ''
   const rollNumber = rollOverride ?? profile?.studentId ?? ''
+
+  if (isLocalAccount(email)) {
+    return (
+      <Card
+        title="Check in to class"
+        description="Live code check-in uses a separate shared backend"
+      >
+        <p className="text-sm text-slate-500">
+          This account stores attendance on this device. Use manual attendance or have
+          staff confirm attendance from the camera panel.
+        </p>
+      </Card>
+    )
+  }
 
   if (!isAttendanceSyncConfigured) {
     return (

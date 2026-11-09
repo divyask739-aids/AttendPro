@@ -2,6 +2,7 @@ import { requireSupabase } from '@/lib/supabase'
 import type {
   AttendanceCheckIn,
   AttendanceRecord,
+  AttendanceRecordSource,
   AttendanceSession,
   AttendanceStatus,
   Subject,
@@ -15,10 +16,8 @@ import type {
  *   2. The existing Subject + AttendanceRecord model
  *      (attendance_subjects / attendance_records)
  *
- * Both are reached through security-definer Postgres functions in
- * `supabase/schema.sql`. Tables are not exposed to the anon role, so a
- * student can only add their own check-in (validated by RPC) and staff can
- * only read sessions/rosters tied to the email they pass.
+ * The Auth hardening migration wraps the original schema functions and
+ * derives the caller's verified email and role from auth.uid().
  * ================================================================== */
 
 interface SessionRow {
@@ -41,6 +40,14 @@ interface CheckInRow {
   checked_in_at: string
 }
 
+interface AttendanceNotificationRow {
+  id: string
+  title: string
+  body: string
+  created_at: string
+  read_at: string | null
+}
+
 interface SubjectRow {
   id: string
   name: string
@@ -55,6 +62,7 @@ interface RecordRow {
   subject_id: string
   date: string
   status: AttendanceStatus
+  source?: AttendanceRecordSource
 }
 
 interface StaffAttendanceRow {
@@ -92,6 +100,14 @@ export interface SharedIdentity {
   studentYear: string
 }
 
+export interface AttendanceNotification {
+  id: string
+  title: string
+  body: string
+  createdAt: string
+  readAt: string | null
+}
+
 function toSession(row: SessionRow): AttendanceSession {
   return {
     id: row.id,
@@ -116,6 +132,16 @@ function toCheckIn(row: CheckInRow): AttendanceCheckIn {
   }
 }
 
+function toAttendanceNotification(row: AttendanceNotificationRow): AttendanceNotification {
+  return {
+    id: row.id,
+    title: row.title,
+    body: row.body,
+    createdAt: row.created_at,
+    readAt: row.read_at,
+  }
+}
+
 function toSubject(row: SubjectRow): Subject {
   return {
     id: row.id,
@@ -133,6 +159,7 @@ function toRecord(row: RecordRow): AttendanceRecord {
     subjectId: row.subject_id,
     date: row.date,
     status: row.status,
+    source: row.source ?? 'manual',
   }
 }
 
@@ -266,6 +293,40 @@ export async function checkInWithCode(input: CheckInInput): Promise<AttendanceCh
   const row = asSingle<CheckInRow>(data)
   if (!row) throw new Error('Could not mark your attendance.')
   return toCheckIn(row)
+}
+
+export async function confirmCameraAttendance(
+  sessionId: string,
+  studentEmail: string,
+): Promise<AttendanceCheckIn> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('confirm_camera_attendance', {
+    p_session_id: sessionId,
+    p_student_email: studentEmail.trim().toLowerCase(),
+  })
+  if (error) throw new Error(messageOf(error, "Could not confirm this student's attendance."))
+  const row = asSingle<CheckInRow>(data)
+  if (!row) throw new Error("Could not confirm this student's attendance.")
+  return toCheckIn(row)
+}
+
+export async function fetchAttendanceNotifications(
+  limit = 20,
+): Promise<AttendanceNotification[]> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('get_attendance_notifications', {
+    p_limit: limit,
+  })
+  if (error) throw new Error(messageOf(error, 'Could not load attendance notifications.'))
+  return asArray<AttendanceNotificationRow>(data).map(toAttendanceNotification)
+}
+
+export async function markAttendanceNotificationRead(id: string): Promise<void> {
+  const client = requireSupabase()
+  const { error } = await client.rpc('mark_attendance_notification_read', {
+    p_notification_id: id,
+  })
+  if (error) throw new Error(messageOf(error, 'Could not update this notification.'))
 }
 
 /* ------------------------------------------------------------------ *
@@ -424,18 +485,19 @@ export async function logSharedAttendance(
   return toSubject(row)
 }
 
-export async function setSharedSubjectCounters(
-  studentEmail: string,
+export async function correctOfficialAttendanceCounters(
+  _studentEmail: string,
   subjectId: string,
   held: number,
   attended: number,
+  reason: string,
 ): Promise<Subject> {
   const client = requireSupabase()
-  const { data, error } = await client.rpc('set_attendance_counters', {
-    p_student_email: studentEmail,
+  const { data, error } = await client.rpc('correct_official_attendance_counters', {
     p_subject_id: subjectId,
     p_held: held,
     p_attended: attended,
+    p_reason: reason.trim(),
   })
   if (error) throw new Error(messageOf(error, 'Could not update attendance.'))
   const row = asSingle<SubjectRow>(data)
@@ -468,28 +530,12 @@ export interface StaffSubjectInput {
   semester: string
 }
 
-export async function syncStaffSubjects(
-  staffEmail: string,
-  subjects: StaffSubjectInput[],
-): Promise<void> {
-  const client = requireSupabase()
-  const { error } = await client.rpc('sync_staff_attendance_subjects', {
-    p_staff_email: staffEmail,
-    p_subjects: subjects.map((subject) => ({
-      name: subject.name,
-      code: subject.code,
-      semester: subject.semester,
-    })),
-  })
-  if (error) throw new Error(messageOf(error, 'Could not sync your taught subjects.'))
-}
-
-/** Restores taught subjects on a new device so a fresh profile cannot wipe them. */
+/** Reads subjects assigned by a trusted platform administrator. */
 export async function fetchSharedStaffSubjects(
   staffEmail: string,
 ): Promise<StaffSubjectInput[]> {
   const client = requireSupabase()
-  const { data, error } = await client.rpc('get_staff_attendance_subjects', {
+  const { data, error } = await client.rpc('get_authorized_staff_subject_assignments', {
     p_staff_email: staffEmail,
   })
   if (error) throw new Error(messageOf(error, 'Could not load your taught subjects.'))

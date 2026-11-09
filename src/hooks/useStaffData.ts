@@ -1,10 +1,16 @@
 import { useEffect } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { fetchStaffRoster, fetchVisibleActivities } from '@/lib/dataApi'
+import {
+  fetchStaffRoster,
+  fetchStudentVerificationRecords,
+  fetchVisibleActivities,
+  isLocalAccount,
+  reviewStudentVerification,
+} from '@/lib/dataApi'
 import { useAttendance } from '@/hooks/useAttendance'
 import { supabase } from '@/lib/supabase'
-import type { UserRole } from '@/types'
+import type { StudentVerificationStatus, UserRole } from '@/types'
 
 /** Staff analytics computed from the same student subject/attendance records. */
 export function useStaffRoster(email: string | undefined) {
@@ -23,7 +29,7 @@ export function useStaffRoster(email: string | undefined) {
   // The database trigger publishes every check-in on `attendance-updates`.
   useEffect(() => {
     const client = supabase
-    if (!client) return
+    if (!client || !email || isLocalAccount(email)) return
 
     const channel = client
       .channel('attendance-updates')
@@ -37,7 +43,7 @@ export function useStaffRoster(email: string | undefined) {
     return () => {
       void client.removeChannel(channel)
     }
-  }, [queryClient])
+  }, [email, queryClient])
 
   return {
     profile: query.data?.profile,
@@ -47,6 +53,40 @@ export function useStaffRoster(email: string | undefined) {
     isError: query.isError,
     error: query.error,
   }
+}
+
+export function useStaffStudentVerifications(email: string | undefined) {
+  const query = useQuery({
+    queryKey: ['student-verifications', email],
+    queryFn: () => fetchStudentVerificationRecords(email ?? ''),
+    enabled: Boolean(email),
+    staleTime: 5_000,
+    refetchOnWindowFocus: true,
+  })
+  return {
+    records: query.data ?? [],
+    isLoading: query.isLoading,
+    isError: query.isError,
+    error: query.error,
+  }
+}
+
+export function useStudentVerificationReview(email: string | undefined) {
+  const queryClient = useQueryClient()
+  const review = useMutation({
+    mutationFn: (input: {
+      studentEmail: string
+      decision: Extract<StudentVerificationStatus, 'verified' | 'rejected'>
+      note?: string
+    }) =>
+      reviewStudentVerification(email ?? '', input.studentEmail, input.decision, input.note),
+    onSuccess: (profile, input) => {
+      queryClient.setQueryData(['profile', input.studentEmail], profile)
+      void queryClient.invalidateQueries({ queryKey: ['student-verifications'] })
+      void queryClient.invalidateQueries({ queryKey: ['staff-roster'] })
+    },
+  })
+  return { review }
 }
 
 export function useVisibleActivities(

@@ -140,13 +140,15 @@ export function useCheckInMutation() {
 
   return useMutation({
     mutationFn: async (input: CheckInInput) => {
-      // Upload this device's existing subjects first so their local attendance
-      // history is not lost. Best-effort: a valid code still enrolls the
-      // student even when this device has nothing cached.
+      // Sync legacy history before the code RPC creates a shared subject.
+      // Otherwise the import RPC's one-time guard would skip that history.
       try {
         await ensureSharedAttendanceReady(input.studentEmail)
-      } catch {
-        // The check-in RPC below is authoritative.
+      } catch (error) {
+        const detail = error instanceof Error ? ` ${error.message}` : ''
+        throw new Error(
+          `Could not sync your existing attendance before check-in. No check-in was submitted; try again.${detail}`,
+        )
       }
       const session = await findSessionByCode(input.code)
       if (!session) {

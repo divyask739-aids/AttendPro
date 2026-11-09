@@ -12,6 +12,7 @@ import { NotFoundPage } from '@/pages/NotFoundPage'
 import { PlannerPage } from '@/pages/PlannerPage'
 import { ProfilePage } from '@/pages/ProfilePage'
 import { RoleHome } from '@/pages/RoleHome'
+import { StudentVerificationPage } from '@/pages/StudentVerificationPage'
 import { TasksPage } from '@/pages/TasksPage'
 import {
   StaffActivitiesPage,
@@ -84,6 +85,10 @@ export default function App() {
               <Route
                 path="planner"
                 element={<Scoped>{(email) => <PlannerPage email={email} />}</Scoped>}
+              />
+              <Route
+                path="verification"
+                element={<Scoped>{(email) => <StudentVerificationPage email={email} />}</Scoped>}
               />
             </Route>
 

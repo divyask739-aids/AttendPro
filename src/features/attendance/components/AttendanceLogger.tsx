@@ -167,6 +167,15 @@ export function AttendanceLogger({ email }: { email: string }) {
                       {subject?.name ?? 'Removed subject'}
                     </p>
                     <p className="text-xs text-slate-500">{formatShortDate(record.date)}</p>
+                    <p className="mt-0.5 text-[11px] text-slate-400">
+                      {record.source === 'staff_confirmed'
+                        ? 'Official · staff confirmed'
+                        : record.source === 'legacy_import'
+                          ? 'Imported · unverified'
+                          : record.source === 'live'
+                            ? 'Legacy check-in · unverified'
+                            : 'Personal · unverified'}
+                    </p>
                   </div>
                   <Badge tone={STATUS_TONE[record.status]} className="capitalize">
                     {record.status}

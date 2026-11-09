@@ -26,6 +26,7 @@ export const ROLE_NAV: Record<UserRole, NavItem[]> = {
     { to: '/', label: 'Dashboard', icon: BookOpenIcon, end: true },
     { to: '/attendance', label: 'Attendance', icon: CalendarIcon },
     { to: '/tasks', label: 'Tasks', icon: TasksIcon },
+    { to: '/verification', label: 'Student Verification', icon: ClipboardIcon },
     { to: '/planner', label: 'Planner', icon: SparklesIcon },
     { to: '/goals', label: 'Productivity', icon: TargetIcon },
     { to: '/profile', label: 'Profile', icon: ClipboardIcon },
@@ -79,7 +80,7 @@ export function NavLinks({
 
   return (
     <>
-      {items.slice(0, 5).map(({ icon: Icon, ...item }) => (
+      {items.map(({ icon: Icon, ...item }) => (
         <NavLink
           key={item.to}
           to={item.to}
@@ -87,7 +88,7 @@ export function NavLinks({
           onClick={onNavigate}
           className={({ isActive }) =>
             [
-              'flex flex-col items-center gap-1 rounded-lg py-2.5 text-[10px] font-medium transition-colors',
+              'flex min-w-[4.5rem] flex-1 flex-col items-center gap-1 rounded-lg py-2.5 text-[10px] font-medium transition-colors',
               isActive ? 'text-indigo-600' : 'text-slate-500 hover:text-slate-700',
             ].join(' ')
           }

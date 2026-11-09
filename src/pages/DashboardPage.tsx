@@ -15,7 +15,7 @@ import { dueDateLabel } from '@/lib/utils'
 
 export function DashboardPage({ email }: { email: string }) {
   const { profile } = useStudentProfile(email)
-  const { summary, isLoading } = useAttendance(email)
+  const { summary, isLoading, isError, error } = useAttendance(email)
   const { tasks } = useTasks(email)
   const { goals } = useProductivityGoals(email)
   const { recommendations } = useRecommendations(email)
@@ -36,6 +36,17 @@ export function DashboardPage({ email }: { email: string }) {
           {profile?.course ? `${profile.course} · ` : ''}Your attendance, tasks and plan at a glance
         </p>
       </header>
+
+      {isError && (
+        <p
+          role="alert"
+          className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700"
+        >
+          {error instanceof Error
+            ? `Attendance data could not be loaded. ${error.message}`
+            : 'Attendance data could not be loaded. Refresh and try again.'}
+        </p>
+      )}
 
       {isLoading ? (
         <p className="mt-6 text-sm text-slate-500">Loading your data...</p>
