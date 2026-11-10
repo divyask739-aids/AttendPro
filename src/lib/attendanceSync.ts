@@ -6,6 +6,7 @@ import type {
   AttendanceSession,
   AttendanceStatus,
   Subject,
+  StudentVerificationStatus,
 } from '@/types'
 
 /* ================================================================== *
@@ -85,6 +86,11 @@ export interface StaffAttendanceSharedRow {
   studentId: string
   studentCourse: string
   studentYear: string
+  rollNumber?: string
+  department?: string
+  year?: string
+  section?: string
+  verificationStatus?: StudentVerificationStatus
   subjectId: string
   subjectName: string
   subjectCode: string

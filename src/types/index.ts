@@ -58,6 +58,7 @@ export interface StudentVerificationRecord {
   section: string
   status: StudentVerificationStatus
   note: string
+  enrolledSubjects: Array<Pick<Subject, 'name' | 'code'>>
 }
 
 export type AttendanceStatus = 'present' | 'absent' | 'late' | 'cancelled'

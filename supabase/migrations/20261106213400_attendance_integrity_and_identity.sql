@@ -775,7 +775,9 @@ begin
     on auth_user.id = subject.student_user_id
    and auth_user.email_confirmed_at is not null
   join public.user_profiles as profile
-    on profile.id = auth_user.id and profile.role = 'student'
+    on profile.id = auth_user.id
+   and profile.role = 'student'
+   and profile.verification_status = 'verified'
   left join official_records as records
     on records.student_user_id = subject.student_user_id
    and records.subject_key = subject.subject_key
@@ -1338,8 +1340,10 @@ set search_path = ''
 as $$
 declare
   v_staff_email text := public.attendpro_require_role('staff');
+  v_student_email text := lower(trim(p_student_email));
   v_session public.attendance_sessions;
   v_subject public.attendance_subjects;
+  v_roll_number text;
   v_checkin public.attendance_checkins;
   v_existing public.attendance_records;
 begin
@@ -1405,6 +1409,12 @@ begin
   if v_subject.id is null then
     raise exception 'The student is not verified or enrolled in this exact subject.';
   end if;
+
+  select profile.roll_number into v_roll_number
+  from public.user_profiles as profile
+  where profile.id = v_subject.student_user_id
+    and profile.role = 'student'
+    and profile.verification_status = 'verified';
 
   select record.* into v_existing
   from public.attendance_records as record
@@ -1473,8 +1483,13 @@ begin
     )
     values (
       v_session.id, v_subject.student_email, v_subject.student_user_id,
-      v_subject.student_name, v_subject.student_id, now()
+      v_subject.student_name, coalesce(v_roll_number, ''), now()
     )
+    returning * into v_checkin;
+  else
+    update public.attendance_checkins
+    set roll_number = coalesce(v_roll_number, '')
+    where id = v_checkin.id
     returning * into v_checkin;
   end if;
 

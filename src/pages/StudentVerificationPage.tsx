@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import QRCode from 'qrcode'
 
 import { Card } from '@/components/ui/Card'
+import { StudentVerificationCamera } from '@/features/attendance/components/StudentVerificationCamera'
 import { useStudentProfile, useStudentVerificationMutation } from '@/hooks/useStudentData'
 import type { StudentProfile, StudentVerificationStatus } from '@/types'
 
@@ -20,7 +20,7 @@ function verificationStatus(profile: StudentProfile): StudentVerificationStatus 
 }
 
 export function StudentVerificationPage({ email }: { email: string }) {
-  const { profile, isLoading } = useStudentProfile(email)
+  const { profile, isLoading, isError, error } = useStudentProfile(email)
   const { submitVerification } = useStudentVerificationMutation(email)
   const [details, setDetails] = useState({
     rollNumber: '',
@@ -28,9 +28,6 @@ export function StudentVerificationPage({ email }: { email: string }) {
     year: '',
     section: '',
   })
-  const [qrCode, setQrCode] = useState('')
-  const [qrError, setQrError] = useState<string | null>(null)
-
   useEffect(() => {
     if (!profile) return
     setDetails({
@@ -45,39 +42,14 @@ export function StudentVerificationPage({ email }: { email: string }) {
   const isPending = profile?.verificationStatus === 'pending'
   const isLocked = isVerified || isPending
 
-  useEffect(() => {
-    let active = true
-    if (!profile?.studentId || !isVerified) {
-      setQrCode('')
-      setQrError(null)
-      return () => {
-        active = false
-      }
-    }
-
-    void QRCode.toDataURL(`ATTENDPRO:STUDENT:${profile.studentId}`, {
-      errorCorrectionLevel: 'M',
-      margin: 3,
-      width: 280,
-    }).then(
-      (dataUrl) => {
-        if (active) {
-          setQrCode(dataUrl)
-          setQrError(null)
-        }
-      },
-      (error: unknown) => {
-        if (active) {
-          setQrError(error instanceof Error ? error.message : 'Could not generate the student QR code.')
-        }
-      },
-    )
-    return () => {
-      active = false
-    }
-  }, [isVerified, profile?.studentId])
-
   if (isLoading || !profile) {
+    if (isError) {
+      return (
+        <p role="alert" className="text-sm text-rose-700">
+          {error instanceof Error ? error.message : 'Could not load your verification details.'}
+        </p>
+      )
+    }
     return <p className="text-sm text-slate-500">Loading verification details...</p>
   }
 
@@ -95,7 +67,7 @@ export function StudentVerificationPage({ email }: { email: string }) {
           Student Verification
         </h1>
         <p className="mt-1 text-sm text-slate-500">
-          Submit your academic details for staff review. Your attendance QR code is available after approval.
+          Submit your academic details for staff review. Camera face detection is only a presence aid and never identifies you.
         </p>
       </header>
 
@@ -120,6 +92,10 @@ export function StudentVerificationPage({ email }: { email: string }) {
             Staff note: {profile.verificationNote}
           </p>
         )}
+
+        <div className="mb-5">
+          <StudentVerificationCamera />
+        </div>
 
         <form onSubmit={onSubmit} className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2">
@@ -205,39 +181,6 @@ export function StudentVerificationPage({ email }: { email: string }) {
           )}
         </form>
 
-        {isVerified && (
-          <div className="mt-5 flex flex-wrap items-center gap-4 rounded-xl border border-emerald-100 bg-emerald-50/50 p-4">
-            {qrCode ? (
-              <img
-                src={qrCode}
-                alt={`Verified student QR code for ${profile.studentId}`}
-                className="h-36 w-36 rounded-lg bg-white p-2"
-              />
-            ) : (
-              <div className="flex h-36 w-36 items-center justify-center rounded-lg border border-dashed border-slate-300 bg-white text-center text-xs text-slate-500">
-                QR code unavailable
-              </div>
-            )}
-            <div className="min-w-0 flex-1">
-              <h2 className="text-sm font-semibold text-slate-900">Your attendance QR code</h2>
-              <p className="mt-1 font-mono text-xs text-slate-600">{profile.studentId}</p>
-              <p className="mt-2 text-xs text-slate-500">
-                The QR code contains only your student ID. Staff must verify you and confirm attendance.
-              </p>
-              {qrCode && (
-                <div className="mt-3 flex gap-3 text-xs font-semibold">
-                  <a href={qrCode} target="_blank" rel="noreferrer" className="text-indigo-700 hover:text-indigo-900">
-                    View QR code
-                  </a>
-                  <a href={qrCode} download={`${profile.studentId}-attendance.png`} className="text-indigo-700 hover:text-indigo-900">
-                    Download QR code
-                  </a>
-                </div>
-              )}
-              {qrError && <p role="alert" className="mt-2 text-xs text-rose-700">{qrError}</p>}
-            </div>
-          </div>
-        )}
       </Card>
     </div>
   )

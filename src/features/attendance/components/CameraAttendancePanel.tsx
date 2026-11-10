@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { BrowserQRCodeReader } from '@zxing/browser'
 
 import { Badge } from '@/components/ui/Badge'
 import { Card, EmptyState } from '@/components/ui/Card'
+import { useStaffAttendanceSessions } from '@/hooks/useAttendanceSessions'
+import { confirmCameraAttendance } from '@/lib/attendanceSync'
 import {
   confirmLocalStaffAttendance,
   hasLocalAttendanceRecord,
@@ -16,7 +17,8 @@ import {
   type DetectedFace,
 } from '@/lib/faceDetection'
 import { isoToday } from '@/lib/date'
-import { matchesSubjectKey, subjectKey } from '@/lib/subjectKey'
+import { isSupabaseAuthEnabled } from '@/lib/supabase'
+import { matchesSubjectIdentity, subjectKey } from '@/lib/subjectKey'
 import type {
   StaffSubject,
   StudentAttendanceRow,
@@ -86,12 +88,11 @@ export function CameraAttendancePanel({
   const selectedSubjectKey = useRef('')
   const [subjectKeyValue, setSubjectKeyValue] = useState('')
   const [sessionDate, setSessionDate] = useState(isoToday)
+  const [sharedSessionId, setSharedSessionId] = useState('')
+  const [confirmedEmails, setConfirmedEmails] = useState<Set<string>>(() => new Set())
   const [selectedEmails, setSelectedEmails] = useState<Set<string>>(() => new Set())
   const [faces, setFaces] = useState<DetectedFace[]>([])
   const [cameraError, setCameraError] = useState<string | null>(null)
-  const [qrError, setQrError] = useState<string | null>(null)
-  const [scannedStudent, setScannedStudent] = useState<StudentAttendanceRow | null>(null)
-  const [scanMessage, setScanMessage] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [actionSuccess, setActionSuccess] = useState<string | null>(null)
   const [isStarting, setIsStarting] = useState(false)
@@ -101,11 +102,8 @@ export function CameraAttendancePanel({
   const videoRef = useRef<HTMLVideoElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const detectorRef = useRef<Awaited<ReturnType<typeof createFaceDetector>> | null>(null)
-  const scannerRef = useRef<BrowserQRCodeReader | null>(null)
-  const scannerControlsRef = useRef<{ stop: () => void } | null>(null)
   const frameRef = useRef<number | null>(null)
   const generationRef = useRef(0)
-  const lastScannedCodeRef = useRef('')
   const startPendingRef = useRef(false)
   const lastDetectionRef = useRef(0)
   const mountedRef = useRef(false)
@@ -113,11 +111,40 @@ export function CameraAttendancePanel({
   const selectedSubject =
     subjects.find((subject) => subjectKey(subject.name, subject.code) === subjectKeyValue) ??
     subjects[0]
+  const { sessions: sharedSessions } = useStaffAttendanceSessions(
+    isSupabaseAuthEnabled ? email : undefined,
+  )
+  const matchingSharedSessions = useMemo(
+    () =>
+      sharedSessions.filter(
+        (session) =>
+          session.isOpen &&
+          new Date(session.expiresAt).getTime() > Date.now() &&
+          selectedSubject &&
+          matchesSubjectIdentity(
+            session.subjectName,
+            session.subjectCode,
+            selectedSubject.name,
+            selectedSubject.code,
+          ),
+      ),
+    [selectedSubject, sharedSessions],
+  )
+  const selectedSharedSession =
+    matchingSharedSessions.find((session) => session.id === sharedSessionId) ?? null
   const subjectRoster = useMemo(() => {
     if (!selectedSubject) return []
-    const key = subjectKey(selectedSubject.name, selectedSubject.code)
     return rows
-      .filter((row) => matchesSubjectKey(row.subjectName, row.subjectCode, key))
+      .filter(
+        (row) =>
+          matchesSubjectIdentity(
+            row.subjectName,
+            row.subjectCode,
+            selectedSubject.name,
+            selectedSubject.code,
+          ) &&
+          getVerificationStatus(row) === 'verified',
+      )
       .sort((a, b) => a.studentName.localeCompare(b.studentName))
   }, [rows, selectedSubject])
 
@@ -130,21 +157,28 @@ export function CameraAttendancePanel({
       setSelectedEmails(new Set())
       setActionError(null)
       setActionSuccess(null)
-      setScannedStudent(null)
-      setScanMessage(null)
     }
   }, [selectedSubject])
+
+  useEffect(() => {
+    if (!isSupabaseAuthEnabled) return
+    setSharedSessionId((current) =>
+      matchingSharedSessions.some((session) => session.id === current)
+        ? current
+        : matchingSharedSessions[0]?.id ?? '',
+    )
+  }, [matchingSharedSessions])
 
   useEffect(() => {
     setSelectedEmails(new Set())
     setActionError(null)
     setActionSuccess(null)
-    setScannedStudent(null)
-    setScanMessage(null)
-  }, [sessionDate, subjectKeyValue])
+    setConfirmedEmails(new Set())
+  }, [selectedSharedSession?.id, sessionDate, subjectKeyValue])
 
   const checkedInEmails = useMemo(() => {
     if (!selectedSubject) return new Set<string>()
+    if (isSupabaseAuthEnabled) return confirmedEmails
     return new Set(
       subjectRoster
         .filter((student) =>
@@ -152,7 +186,7 @@ export function CameraAttendancePanel({
         )
         .map((student) => student.studentEmail.toLowerCase()),
     )
-  }, [selectedSubject, sessionDate, subjectRoster])
+  }, [confirmedEmails, selectedSubject, sessionDate, subjectRoster])
   const pendingStudents = useMemo(
     () =>
       subjectRoster.filter(
@@ -175,13 +209,11 @@ export function CameraAttendancePanel({
 
   const stopCamera = useCallback((updateState = true) => {
     generationRef.current += 1
+    startPendingRef.current = false
     if (frameRef.current !== null) {
       window.cancelAnimationFrame(frameRef.current)
       frameRef.current = null
     }
-    scannerControlsRef.current?.stop()
-    scannerControlsRef.current = null
-    scannerRef.current = null
     closeFaceDetector(detectorRef.current)
     detectorRef.current = null
 
@@ -191,7 +223,7 @@ export function CameraAttendancePanel({
     if (videoRef.current) videoRef.current.srcObject = null
 
     if (updateState) {
-      setIsStarting(startPendingRef.current)
+      setIsStarting(false)
       setIsRunning(false)
       setFaces([])
     }
@@ -222,11 +254,7 @@ export function CameraAttendancePanel({
 
     const generation = ++generationRef.current
     startPendingRef.current = true
-    lastScannedCodeRef.current = ''
     setCameraError(null)
-    setQrError(null)
-    setScannedStudent(null)
-    setScanMessage(null)
     setIsStarting(true)
 
     try {
@@ -275,56 +303,16 @@ export function CameraAttendancePanel({
         frameRef.current = window.requestAnimationFrame(detectFrame)
       }
       frameRef.current = window.requestAnimationFrame(detectFrame)
-
-      try {
-        const reader = new BrowserQRCodeReader()
-        scannerRef.current = reader
-        const controls = await reader.decodeFromVideoElement(video, (result, error) => {
-          if (generationRef.current !== generation) return
-          if (
-            error &&
-            !['NotFoundException', 'FormatException', 'ChecksumException'].includes(error.getKind())
-          ) {
-            setQrError(`QR scanning stopped: ${error.message}`)
-            scannerControlsRef.current?.stop()
-            return
-          }
-          if (!result) return
-
-          const value = result.getText()
-          if (lastScannedCodeRef.current === value) return
-          lastScannedCodeRef.current = value
-          const studentId = value.startsWith('ATTENDPRO:STUDENT:')
-            ? value.slice('ATTENDPRO:STUDENT:'.length)
-            : ''
-          const match = subjectRoster.find((student) => student.studentId === studentId)
-          setScannedStudent(match ?? null)
-          setScanMessage(
-            match
-              ? `Scanned ${match.studentName} (${match.studentId}). Check the displayed details and verify the status before selecting.`
-              : studentId
-                ? 'Student ID was not found in this subject roster.'
-                : 'This QR code is not an AttendPro student code.',
-          )
-        })
-        if (generationRef.current === generation) {
-          scannerControlsRef.current = controls
-        } else {
-          controls.stop()
-        }
-      } catch (error) {
-        setQrError(
-          error instanceof Error ? `QR scanner could not start: ${error.message}` : 'QR scanner could not start.',
-        )
-      }
     } catch (error) {
       if (generationRef.current === generation) {
         stopCamera()
         setCameraError(cameraErrorMessage(error))
       }
     } finally {
-      startPendingRef.current = false
-      if (mountedRef.current) {
+      if (generationRef.current === generation) {
+        startPendingRef.current = false
+      }
+      if (mountedRef.current && generationRef.current === generation) {
         setIsStarting(false)
       }
     }
@@ -332,6 +320,10 @@ export function CameraAttendancePanel({
 
   const confirmAttendance = async () => {
     if (!selectedSubject || pendingStudents.length === 0) return
+    if (isSupabaseAuthEnabled && !selectedSharedSession) {
+      setActionError('Start or select an open attendance session for this subject before confirming attendance.')
+      return
+    }
     setActionError(null)
     setActionSuccess(null)
     setIsSaving(true)
@@ -339,7 +331,9 @@ export function CameraAttendancePanel({
     try {
       const results = await Promise.allSettled(
         pendingStudents.map((student) =>
-          confirmLocalStaffAttendance(email, student.studentEmail, student.subjectId, sessionDate),
+          isSupabaseAuthEnabled
+            ? confirmCameraAttendance(selectedSharedSession?.id ?? '', student.studentEmail)
+            : confirmLocalStaffAttendance(email, student.studentEmail, student.subjectId, sessionDate),
         ),
       )
       const savedEmails = new Set<string>()
@@ -363,7 +357,12 @@ export function CameraAttendancePanel({
           queryClient.invalidateQueries({ queryKey: ['staff-roster'] }),
           queryClient.invalidateQueries({ queryKey: ['subjects'] }),
           queryClient.invalidateQueries({ queryKey: ['attendance-records'] }),
+          queryClient.invalidateQueries({ queryKey: ['attendance-sessions'] }),
+          queryClient.invalidateQueries({ queryKey: ['attendance-checkins', selectedSharedSession?.id] }),
         ])
+        if (isSupabaseAuthEnabled) {
+          setConfirmedEmails((current) => new Set([...current, ...savedEmails]))
+        }
         setSelectedEmails((current) => {
           const next = new Set(current)
           savedEmails.forEach((studentEmail) => next.delete(studentEmail))
@@ -386,7 +385,7 @@ export function CameraAttendancePanel({
   return (
     <Card
       title="Camera-assisted attendance"
-      description="Face detection and QR scanning are local visual aids. Staff must verify each student before saving."
+      description="Face detection shows presence only. Staff must visually identify students from the verified roster and confirm attendance."
     >
       <div className="grid gap-3 sm:grid-cols-2">
         <div>
@@ -399,8 +398,6 @@ export function CameraAttendancePanel({
             onChange={(event) => {
               setSubjectKeyValue(event.target.value)
               setSelectedEmails(new Set())
-              setScannedStudent(null)
-              setScanMessage(null)
               setActionError(null)
               setActionSuccess(null)
             }}
@@ -415,28 +412,58 @@ export function CameraAttendancePanel({
             ))}
           </select>
         </div>
-        <div>
-          <label htmlFor="camera-attendance-date" className="mb-1 block text-xs font-medium text-slate-600">
-            Attendance session date
-          </label>
-          <input
-            id="camera-attendance-date"
-            type="date"
-            value={sessionDate}
-            onChange={(event) => setSessionDate(event.target.value)}
-            className={inputClass}
-          />
-        </div>
+        {isSupabaseAuthEnabled ? (
+          <div>
+            <label htmlFor="camera-attendance-session" className="mb-1 block text-xs font-medium text-slate-600">
+              Open attendance session
+            </label>
+            <select
+              id="camera-attendance-session"
+              value={selectedSharedSession?.id ?? ''}
+              onChange={(event) => setSharedSessionId(event.target.value)}
+              className={inputClass}
+              disabled={matchingSharedSessions.length === 0}
+            >
+              {matchingSharedSessions.length === 0 ? (
+                <option value="">No open session for this subject</option>
+              ) : (
+                matchingSharedSessions.map((session) => (
+                  <option key={session.id} value={session.id}>
+                    Expires {new Date(session.expiresAt).toLocaleTimeString()}
+                  </option>
+                ))
+              )}
+            </select>
+            {!selectedSharedSession && (
+              <p className="mt-1 text-xs text-slate-500">
+                Start an attendance session in the Live Attendance section first.
+              </p>
+            )}
+          </div>
+        ) : (
+          <div>
+            <label htmlFor="camera-attendance-date" className="mb-1 block text-xs font-medium text-slate-600">
+              Attendance session date
+            </label>
+            <input
+              id="camera-attendance-date"
+              type="date"
+              value={sessionDate}
+              onChange={(event) => setSessionDate(event.target.value)}
+              className={inputClass}
+            />
+          </div>
+        )}
       </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-        <section aria-label="Webcam face detection and QR scanning">
+        <section aria-label="Webcam face detection">
           <div className="relative aspect-video overflow-hidden rounded-2xl bg-slate-950">
             <video
               ref={videoRef}
               muted
               playsInline
-              aria-label="Live webcam preview for face detection and student QR scanning"
+              aria-label="Live webcam preview for face detection"
               className="absolute inset-0 h-full w-full scale-x-[-1] object-cover"
             />
             {!isRunning && !isStarting && (
@@ -454,7 +481,7 @@ export function CameraAttendancePanel({
             ))}
             {isStarting && (
               <div className="absolute inset-0 flex items-center justify-center bg-slate-950/60 text-sm font-medium text-white">
-                Starting camera, face detection, and QR scanner...
+                Starting camera and face detection...
               </div>
             )}
             {(isRunning || isStarting) && (
@@ -487,65 +514,23 @@ export function CameraAttendancePanel({
               {cameraError}
             </p>
           )}
-          {qrError && (
-            <p role="alert" className="mt-2 rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-700">
-              {qrError}
-            </p>
-          )}
-          {scanMessage && (
-            <p role="status" className="mt-2 rounded-xl bg-indigo-50 px-3 py-2 text-xs text-indigo-800">
-              {scanMessage}
-            </p>
-          )}
-          {scannedStudent && (
-            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-indigo-100 bg-indigo-50/60 p-3">
-              <div className="min-w-0 text-xs text-indigo-900">
-                <p className="font-semibold">{scannedStudent.studentName} · {scannedStudent.studentId}</p>
-                <p className="mt-1">
-                  Roll {scannedStudent.rollNumber || '—'} · {scannedStudent.department || 'Department not set'}
-                </p>
-                <p className="mt-1">
-                  Verification: {verificationLabel(getVerificationStatus(scannedStudent))}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  const key = scannedStudent.studentEmail.toLowerCase()
-                  setSelectedEmails((current) => new Set(current).add(key))
-                }}
-                disabled={
-                  getVerificationStatus(scannedStudent) !== 'verified' ||
-                  checkedInEmails.has(scannedStudent.studentEmail.toLowerCase()) ||
-                  isSaving
-                }
-                className="rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50"
-              >
-                {getVerificationStatus(scannedStudent) !== 'verified'
-                  ? 'Verification required'
-                  : checkedInEmails.has(scannedStudent.studentEmail.toLowerCase())
-                  ? 'Already present'
-                  : 'Select for review'}
-              </button>
-            </div>
-          )}
           <p className="mt-2 text-xs leading-relaxed text-slate-500">
-            Face boxes indicate detected faces only; they never identify a person. Face frames are processed locally and are not captured, stored, or uploaded. QR codes contain only the student ID.
+            Face boxes indicate visible faces only; they never identify a person or select a student. Video is processed locally and is not captured, stored, or uploaded.
           </p>
         </section>
 
         <section aria-labelledby="camera-roster-heading">
           <div className="flex items-center justify-between gap-2">
             <h3 id="camera-roster-heading" className="text-sm font-semibold text-slate-900">
-              Student roster
+              Verified student roster
             </h3>
             <Badge tone="neutral">{pendingStudents.length} selected</Badge>
           </div>
           {subjectRoster.length === 0 ? (
             <div className="mt-3">
               <EmptyState
-                title="No enrolled students for this subject."
-                description="Students appear here when their local student account has this subject."
+                title="No verified students are enrolled in this subject."
+                description="Student accounts are not enrolled automatically. Students must add this subject using its code (case and extra spaces do not matter), and staff must approve verification before camera attendance."
               />
             </div>
           ) : (
@@ -574,7 +559,11 @@ export function CameraAttendancePanel({
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-sm font-medium text-slate-800">{student.studentName}</span>
                         <span className="block truncate text-xs text-slate-500">
-                          {student.studentId !== '-' ? `${student.studentId} · ` : ''}Roll {student.rollNumber || '—'} · {student.studentEmail}
+                          {student.studentId !== '-' ? `${student.studentId} · ` : ''}
+                          Roll {student.rollNumber || '—'} · {student.studentEmail}
+                          {' · '}{student.department || 'Department not set'}
+                          {' · Year '}{student.year || '—'}
+                          {' · Section '}{student.section || '—'}
                         </span>
                       </span>
                       {alreadyPresent && <Badge tone="success">Present</Badge>}
@@ -597,7 +586,7 @@ export function CameraAttendancePanel({
           Review selected students
         </h3>
         {pendingStudents.length === 0 ? (
-          <p className="mt-1 text-sm text-slate-600">Scan a student QR code or select and visually verify students in the roster.</p>
+          <p className="mt-1 text-sm text-slate-600">Visually identify students from the roster, select their names, and review the selection before confirming.</p>
         ) : (
           <ul className="mt-2 flex flex-wrap gap-2">
             {pendingStudents.map((student) => (

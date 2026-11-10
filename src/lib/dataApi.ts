@@ -16,13 +16,29 @@ import {
   type StaffAttendanceSharedRow,
 } from '@/lib/attendanceSync'
 import { isoToday, makeId } from '@/lib/date'
-import { isAttendanceSyncConfigured } from '@/lib/supabase'
-import { subjectKey } from '@/lib/subjectKey'
+import { isAttendanceSyncConfigured, isSupabaseAuthEnabled } from '@/lib/supabase'
+import {
+  fetchOwnSupabaseStudentProfile,
+  fetchOwnSupabaseStaffProfile,
+  fetchSupabaseStudentVerificationRecords,
+  getSupabaseSession,
+  loginSupabaseAccount,
+  logoutSupabaseAccount,
+  registerSupabaseStudent,
+  requestSupabasePasswordReset,
+  reviewSupabaseStudentVerification,
+  saveOwnSupabaseStaffProfile,
+  saveOwnSupabaseStudentProfile,
+  submitSupabaseStudentVerification,
+  updateSupabasePassword,
+} from '@/lib/supabaseAuth'
+import { matchesSubjectIdentity, subjectKey } from '@/lib/subjectKey'
 import {
   dataKey,
   isArrayOfObjects,
   readStore,
   removeStore,
+  STORAGE_PREFIX,
   storageKeys,
   writeStore,
   writeStoreOrThrow,
@@ -58,8 +74,34 @@ function readUsers(): UserAccount[] {
       typeof item === 'object' &&
       item !== null &&
       typeof (item as UserAccount).email === 'string' &&
-      typeof (item as UserAccount).role === 'string',
+      ((item as UserAccount).role === 'student' || (item as UserAccount).role === 'staff'),
   )
+}
+
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase()
+}
+
+const localMutationQueues = new Map<string, Promise<void>>()
+
+async function withLocalMutationLock<T>(key: string, operation: () => T): Promise<T> {
+  if (typeof navigator !== 'undefined' && navigator.locks) {
+    return navigator.locks.request(key, operation)
+  }
+
+  const previous = localMutationQueues.get(key) ?? Promise.resolve()
+  let release: () => void = () => undefined
+  const current = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  localMutationQueues.set(key, current)
+  await previous
+  try {
+    return operation()
+  } finally {
+    release()
+    if (localMutationQueues.get(key) === current) localMutationQueues.delete(key)
+  }
 }
 
 export interface StudentRegistrationInput {
@@ -135,6 +177,8 @@ function makeSession(account: UserAccount): Session {
 }
 
 export async function getSession(): Promise<Session | null> {
+  if (isSupabaseAuthEnabled) return getSupabaseSession()
+
   const saved = readStore<unknown>(storageKeys.session, null)
   if (
     typeof saved !== 'object' ||
@@ -157,16 +201,438 @@ export function getUsers(): UserAccount[] {
 }
 
 export function getAccount(email: string): UserAccount | null {
-  const target = email.trim().toLowerCase()
-  return readUsers().find((user) => user.email === target) ?? null
+  const target = normalizeEmail(email)
+  return readUsers().find((user) => normalizeEmail(user.email) === target) ?? null
 }
 
 export function isLocalAccount(email: string): boolean {
   return Boolean(getAccount(email))
 }
 
+export interface LocalDataAuditSummary {
+  studentAccounts: number
+  staffAccounts: number
+  invalidAccountRecords: number
+  duplicateEmailRecords: number
+  duplicateStudentRecords: number
+  duplicateStudentProfileGroups: number
+  duplicateStaffProfileGroups: number
+  duplicateVerificationRecords: number
+  duplicateStudentIdGroups: number
+  duplicateRollNumberGroups: number
+  duplicateStaffRecords: number
+  duplicateStaffIdGroups: number
+  duplicateAttendanceRecords: number
+  possibleAttendanceDuplicates: number
+  demoCandidates: number
+  demoRecordsRemoved: number
+  validAccountsPreserved: number
+}
+
+export interface LocalDataAuditFinding {
+  category: string
+  records: string[]
+  recommendation: string
+}
+
+export interface LocalDataAudit {
+  generatedAt: string
+  summary: LocalDataAuditSummary
+  findings: LocalDataAuditFinding[]
+  limitations: string[]
+}
+
+function assertSignedInLocalStaff(email: string): void {
+  const account = getAccount(email)
+  const rawSession = readStore<unknown>(storageKeys.session, null)
+  if (
+    !account ||
+    account.role !== 'staff' ||
+    typeof rawSession !== 'object' ||
+    rawSession === null ||
+    (rawSession as Session).role !== 'staff' ||
+    normalizeEmail((rawSession as Session).email ?? '') !== normalizeEmail(account.email)
+  ) {
+    throw new Error('A signed-in local staff account is required to audit browser data.')
+  }
+}
+
+function groupBy<T>(items: T[], keyOf: (item: T) => string): Map<string, T[]> {
+  const groups = new Map<string, T[]>()
+  for (const item of items) {
+    const key = keyOf(item)
+    if (!key) continue
+    const group = groups.get(key) ?? []
+    group.push(item)
+    groups.set(key, group)
+  }
+  return groups
+}
+
+type AuditProfile = Partial<StudentProfile & StaffProfile> & { auditError?: string }
+
+function auditProfile(email: string, role: UserRole): AuditProfile {
+  const kind = role === 'student' ? 'profile' : 'staffProfile'
+  const raw = window.localStorage.getItem(dataKey(email, kind))
+  if (!raw) return {}
+  try {
+    const value: unknown = JSON.parse(raw)
+    return typeof value === 'object' && value !== null
+      ? (value as Partial<StudentProfile & StaffProfile>)
+      : { auditError: 'Stored profile is not an object.' }
+  } catch (error) {
+    return {
+      auditError: error instanceof Error ? `Stored profile cannot be parsed: ${error.message}` : 'Stored profile cannot be parsed.',
+    }
+  }
+}
+
+export async function auditLocalData(staffEmail: string): Promise<LocalDataAudit> {
+  assertSignedInLocalStaff(staffEmail)
+  if (typeof window === 'undefined' || !window.localStorage) {
+    throw new Error('Browser storage is not available for a local-data audit.')
+  }
+
+  const users = readUsers()
+  const students = users.filter((account) => account.role === 'student')
+  const staff = users.filter((account) => account.role === 'staff')
+  const findings: LocalDataAuditFinding[] = []
+  const rawUsers = window.localStorage.getItem(storageKeys.users)
+  let invalidAccountRecords = 0
+  if (rawUsers) {
+    try {
+      const parsed: unknown = JSON.parse(rawUsers)
+      if (!Array.isArray(parsed)) {
+        findings.push({
+          category: 'Unreadable account registry',
+          records: [storageKeys.users],
+          recommendation: 'Preserve the original account registry and review it before editing.',
+        })
+      } else {
+        invalidAccountRecords = parsed.length - users.length
+        if (invalidAccountRecords > 0) {
+          findings.push({
+            category: 'Invalid account records',
+            records: [`${invalidAccountRecords} registry record(s) were not recognized as student or staff accounts.`],
+            recommendation: 'Review the raw backup before attempting to repair these records.',
+          })
+        }
+      }
+    } catch (error) {
+      findings.push({
+        category: 'Unreadable account registry',
+        records: [error instanceof Error ? error.message : 'Account registry cannot be parsed.'],
+        recommendation: 'Preserve the original account registry and review it before editing.',
+      })
+    }
+  }
+  const duplicateEmailGroups = [...groupBy(users, (account) => normalizeEmail(account.email))]
+    .filter(([, group]) => group.length > 1)
+
+  for (const [, group] of duplicateEmailGroups) {
+    findings.push({
+      category: group.some((account) => account.role !== group[0]?.role)
+        ? 'Conflicting account roles for duplicate email'
+        : 'Duplicate account email',
+      records: group.map((account) => `${account.role}: ${account.email}`),
+      recommendation: 'Review roles and related data before merging or removing any account.',
+    })
+  }
+
+  const profileKeys = new Map<string, { role: UserRole; key: string }[]>()
+  for (const key of Object.keys(window.localStorage)) {
+    const profileKind = key.endsWith('.staffProfile')
+      ? 'staffProfile'
+      : key.endsWith('.profile')
+        ? 'profile'
+        : null
+    if (!profileKind || !key.startsWith(`${STORAGE_PREFIX}.`)) continue
+    const suffix = `.${profileKind}`
+    const profileEmail = key.slice(STORAGE_PREFIX.length + 1, -suffix.length)
+    if (!profileEmail) continue
+    const normalizedEmail = normalizeEmail(profileEmail)
+    const group = profileKeys.get(normalizedEmail) ?? []
+    group.push({ role: profileKind === 'profile' ? 'student' : 'staff', key })
+    profileKeys.set(normalizedEmail, group)
+  }
+  const duplicateStudentProfileGroups = [...profileKeys]
+    .filter(([, group]) => group.filter((entry) => entry.role === 'student').length > 1)
+  const duplicateStaffProfileGroups = [...profileKeys]
+    .filter(([, group]) => group.filter((entry) => entry.role === 'staff').length > 1)
+  for (const [email, group] of duplicateStudentProfileGroups) {
+    findings.push({
+      category: 'Multiple student profile storage keys for normalized email',
+      records: group.filter((entry) => entry.role === 'student').map((entry) => entry.key),
+      recommendation: `Review all records for ${email} and preserve related history before any merge.`,
+    })
+  }
+  for (const [email, group] of duplicateStaffProfileGroups) {
+    findings.push({
+      category: 'Multiple staff profile storage keys for normalized email',
+      records: group.filter((entry) => entry.role === 'staff').map((entry) => entry.key),
+      recommendation: `Review all records for ${email} and preserve permissions and related data before any merge.`,
+    })
+  }
+  for (const [email, group] of profileKeys) {
+    if (!users.some((account) => normalizeEmail(account.email) === email)) {
+      findings.push({
+        category: 'Orphaned profile data',
+        records: group.map((entry) => entry.key),
+        recommendation: 'Match this profile to a valid account before deciding whether it can be removed.',
+      })
+    }
+  }
+
+  const studentProfiles = students.map((account) => ({
+    account,
+    profile: auditProfile(account.email, 'student'),
+  }))
+  const unreadableStudentProfiles = studentProfiles.filter(({ profile }) => profile.auditError)
+  for (const { account, profile } of unreadableStudentProfiles) {
+    findings.push({
+      category: 'Unreadable student profile',
+      records: [`${account.email}: ${profile.auditError}`],
+      recommendation: 'Preserve the original value and review it before changing this account.',
+    })
+  }
+  const duplicateVerificationGroups = [...groupBy(
+    studentProfiles,
+    ({ account }) => normalizeEmail(account.email),
+  )].filter(([, group]) => group.length > 1)
+  for (const [, group] of duplicateVerificationGroups) {
+    findings.push({
+      category: 'Duplicate verification profiles for normalized email',
+      records: group.map(
+        ({ account, profile }) =>
+          `${account.email}: ${profile.verificationStatus ?? 'not_submitted'}`,
+      ),
+      recommendation: 'Compare profile details and review status history before merging.',
+    })
+  }
+  const duplicateStudentIdGroups = [...groupBy(
+    studentProfiles,
+    ({ profile }) => profile.studentId?.trim().toLocaleUpperCase() ?? '',
+  )].filter(([id, group]) => id && group.length > 1)
+  for (const [id, group] of duplicateStudentIdGroups) {
+    findings.push({
+      category: 'Duplicate student ID',
+      records: group.map(({ account }) => `${account.fullName} <${account.email}> (${id})`),
+      recommendation: 'Confirm the institutional records; do not merge on name similarity alone.',
+    })
+  }
+
+  const rollKey = ({ profile }: (typeof studentProfiles)[number]) =>
+    [
+      profile.rollNumber,
+      profile.department,
+      profile.year,
+      profile.section,
+    ].every((value) => typeof value === 'string' && value.trim())
+      ? [
+          profile.rollNumber,
+          profile.department,
+          profile.year,
+          profile.section,
+        ]
+          .map((value) => value?.trim().toLocaleLowerCase())
+          .join('|')
+      : ''
+  const duplicateRollGroups = [...groupBy(studentProfiles, rollKey)]
+    .filter(([, group]) => group.length > 1)
+  for (const [roll, group] of duplicateRollGroups) {
+    findings.push({
+      category: 'Duplicate roll number in academic context',
+      records: group.map(({ account }) => `${account.fullName} <${account.email}> (${roll})`),
+      recommendation: 'Verify the department, year, and section with an authorized registrar.',
+    })
+  }
+
+  const staffProfiles = staff.map((account) => ({
+    account,
+    profile: auditProfile(account.email, 'staff'),
+  }))
+  for (const { account, profile } of staffProfiles.filter(({ profile }) => profile.auditError)) {
+    findings.push({
+      category: 'Unreadable staff profile',
+      records: [`${account.email}: ${profile.auditError}`],
+      recommendation: 'Preserve the original value and review it before changing this account.',
+    })
+  }
+  const duplicateStaffIdGroups = [...groupBy(
+    staffProfiles,
+    ({ profile }) => profile.staffId?.trim().toLocaleUpperCase() ?? '',
+  )].filter(([id, group]) => id && group.length > 1)
+  for (const [id, group] of duplicateStaffIdGroups) {
+    findings.push({
+      category: 'Duplicate staff ID',
+      records: group.map(({ account }) => `${account.fullName} <${account.email}> (${id})`),
+      recommendation: 'Verify staff records and permissions before any change.',
+    })
+  }
+
+  let duplicateAttendanceRecords = 0
+  let possibleAttendanceDuplicates = 0
+  for (const account of students) {
+    const raw = window.localStorage.getItem(dataKey(account.email, 'attendance.records'))
+    if (!raw) continue
+    let records: unknown
+    try {
+      records = JSON.parse(raw)
+    } catch {
+      findings.push({
+        category: 'Unreadable attendance data',
+        records: [account.email],
+        recommendation: 'Preserve the original value and review it before editing.',
+      })
+      continue
+    }
+    if (!Array.isArray(records)) {
+      findings.push({
+        category: 'Unreadable attendance data',
+        records: [`${account.email}: stored value is not a record list.`],
+        recommendation: 'Preserve the original value and review it before editing.',
+      })
+      continue
+    }
+    const validRecords = records.filter(
+      (record): record is AttendanceRecord =>
+        typeof record === 'object' &&
+        record !== null &&
+        typeof (record as AttendanceRecord).id === 'string' &&
+        typeof (record as AttendanceRecord).subjectId === 'string' &&
+        typeof (record as AttendanceRecord).date === 'string',
+    )
+    if (validRecords.length !== records.length) {
+      findings.push({
+        category: 'Invalid attendance records',
+        records: [`${account.email}: ${records.length - validRecords.length} record(s) are missing required identifiers.`],
+        recommendation: 'Review the original records and related subject counters before repair.',
+      })
+    }
+    const idGroups = [...groupBy(validRecords, (record) => record.id)]
+      .filter(([, group]) => group.length > 1)
+    for (const [id, group] of idGroups) {
+      duplicateAttendanceRecords += group.length - 1
+      findings.push({
+        category: 'Duplicate attendance record ID',
+        records: group.map((record) => `${account.email}: ${record.subjectId} on ${record.date} (${id})`),
+        recommendation: 'Review status and linked subject counters before removing excess records.',
+      })
+    }
+    const sessionlessGroups = [...groupBy(
+      validRecords,
+      (record) => `${record.subjectId}|${record.date}`,
+    )].filter(([, group]) => group.length > 1)
+    for (const [sessionlessKey, group] of sessionlessGroups) {
+      possibleAttendanceDuplicates += group.length - 1
+      findings.push({
+        category: 'Possible same-day attendance duplicate (session ID unavailable)',
+        records: group.map((record) => `${account.email}: ${sessionlessKey}, ${record.status}`),
+        recommendation: 'Manual review required: this local record model has no session ID, so do not auto-delete.',
+      })
+    }
+  }
+
+  const demoCandidates = users.filter((account) =>
+    /\b(demo|sample|test)\b|example\.(com|org|net)$|test\.com$/i.test(
+      `${account.fullName} ${account.email}`,
+    ),
+  )
+  for (const account of demoCandidates) {
+    findings.push({
+      category: 'Possible demo or test account',
+      records: [`${account.role}: ${account.fullName} <${account.email}>`],
+      recommendation: 'Confirm this is synthetic data before deleting the account or related records.',
+    })
+  }
+
+  const duplicateStudentRecords = new Set(
+    [
+      ...duplicateEmailGroups.flatMap(([, group]) =>
+        group.filter((account) => account.role === 'student').map((account) => account.email),
+      ),
+      ...duplicateStudentIdGroups.flatMap(([, group]) =>
+        group.map(({ account }) => account.email),
+      ),
+      ...duplicateRollGroups.flatMap(([, group]) =>
+        group.map(({ account }) => account.email),
+      ),
+      ...duplicateStudentProfileGroups.flatMap(([email]) => [email]),
+    ].map(normalizeEmail),
+  ).size
+  const duplicateStaffRecords = new Set(
+    [
+      ...duplicateEmailGroups.flatMap(([, group]) =>
+        group.filter((account) => account.role === 'staff').map((account) => account.email),
+      ),
+      ...duplicateStaffIdGroups.flatMap(([, group]) =>
+        group.map(({ account }) => account.email),
+      ),
+      ...duplicateStaffProfileGroups.flatMap(([email]) => [email]),
+    ].map(normalizeEmail),
+  ).size
+
+  return {
+    generatedAt: new Date().toISOString(),
+    summary: {
+      studentAccounts: students.length,
+      staffAccounts: staff.length,
+      invalidAccountRecords,
+      duplicateEmailRecords: duplicateEmailGroups.reduce(
+        (sum, [, group]) => sum + group.length - 1,
+        0,
+      ),
+      duplicateStudentRecords,
+      duplicateStudentProfileGroups: duplicateStudentProfileGroups.length,
+      duplicateStaffProfileGroups: duplicateStaffProfileGroups.length,
+      duplicateVerificationRecords: duplicateVerificationGroups.reduce(
+        (sum, [, group]) => sum + group.length - 1,
+        0,
+      ),
+      duplicateStudentIdGroups: duplicateStudentIdGroups.length,
+      duplicateRollNumberGroups: duplicateRollGroups.length,
+      duplicateStaffRecords,
+      duplicateStaffIdGroups: duplicateStaffIdGroups.length,
+      duplicateAttendanceRecords,
+      possibleAttendanceDuplicates,
+      demoCandidates: demoCandidates.length,
+      demoRecordsRemoved: 0,
+      validAccountsPreserved: users.length,
+    },
+    findings,
+    limitations: [
+      'This report covers only AttendPro localStorage in this browser profile; it does not inspect other devices or a remote database.',
+      'Verification is stored on the student profile; there is no separate verification-record collection in the current local model.',
+      'Local attendance records have no session ID. Same-subject, same-date rows are candidates only and may represent distinct sessions.',
+      'No records are changed by an audit. Back up the data and review conflicting findings before cleanup.',
+    ],
+  }
+}
+
+export function createLocalDataBackup(staffEmail: string): string {
+  assertSignedInLocalStaff(staffEmail)
+  if (typeof window === 'undefined' || !window.localStorage) {
+    throw new Error('Browser storage is not available for a local-data backup.')
+  }
+  const entries = Object.keys(window.localStorage)
+    .filter((key) => key === STORAGE_PREFIX || key.startsWith(`${STORAGE_PREFIX}.`))
+    .sort()
+    .map((key) => [key, window.localStorage.getItem(key)] as const)
+  return JSON.stringify(
+    {
+      format: 'AttendPro local data backup',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      origin: window.location.origin,
+      entries,
+    },
+    null,
+    2,
+  )
+}
+
 function shouldUseSharedAttendance(email: string): boolean {
-  return isAttendanceSyncConfigured && !isLocalAccount(email)
+  return isAttendanceSyncConfigured && (isSupabaseAuthEnabled || !isLocalAccount(email))
 }
 
 type VerificationDetails = {
@@ -210,7 +676,9 @@ async function assertUniqueStudentRoll(
   const targetYear = normalizeVerificationValue(details.year)
   const targetSection = normalizeVerificationValue(details.section)
   const otherStudents = readUsers().filter(
-    (account) => account.role === 'student' && account.email !== email,
+    (account) =>
+      account.role === 'student' &&
+      normalizeEmail(account.email) !== normalizeEmail(email),
   )
 
   for (const account of otherStudents) {
@@ -230,7 +698,9 @@ async function assertUniqueStudentId(email: string, studentId: string): Promise<
   const normalizedId = studentId.trim().toLocaleUpperCase()
   if (!normalizedId) throw new Error('A unique student ID is required before verification.')
   const otherStudents = readUsers().filter(
-    (account) => account.role === 'student' && account.email !== email,
+    (account) =>
+      account.role === 'student' &&
+      normalizeEmail(account.email) !== normalizeEmail(email),
   )
 
   for (const account of otherStudents) {
@@ -241,36 +711,66 @@ async function assertUniqueStudentId(email: string, studentId: string): Promise<
   }
 }
 
+async function assertUniqueStaffId(email: string, staffId: string): Promise<void> {
+  const normalizedId = staffId.trim().toLocaleUpperCase()
+  if (!normalizedId) return
+  const otherStaff = readUsers().filter(
+    (account) =>
+      account.role === 'staff' &&
+      normalizeEmail(account.email) !== normalizeEmail(email),
+  )
+
+  for (const account of otherStaff) {
+    const profile = await fetchStaffProfile(account.email)
+    if (profile.staffId.trim().toLocaleUpperCase() === normalizedId) {
+      throw new Error('This staff ID is already assigned to another account.')
+    }
+  }
+}
+
 export async function registerAccount(
   credentials: StudentRegistrationInput,
 ): Promise<void> {
-  const email = credentials.email.trim().toLowerCase()
+  if (isSupabaseAuthEnabled) {
+    if (credentials.role !== 'student') {
+      throw new Error('Staff accounts must be invited and approved by an AttendPro administrator.')
+    }
+    await registerSupabaseStudent(credentials)
+    return
+  }
+
+  await withLocalMutationLock('attendpro.unique-identities', () =>
+    registerAccountOnDevice(credentials),
+  )
+}
+
+async function registerAccountOnDevice(
+  credentials: StudentRegistrationInput,
+): Promise<void> {
+  const email = normalizeEmail(credentials.email)
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('Enter a valid email address.')
   if (credentials.password.length < 6) throw new Error('Password must contain at least 6 characters.')
   if (credentials.fullName.trim().length < 2) throw new Error('Enter your full name.')
 
   const existing = getAccount(email)
-  if (existing?.passwordHash && existing.passwordSalt) {
+  if (existing) {
+    if (existing.role !== credentials.role) {
+      throw new Error(`This existing account has the ${existing.role} role.`)
+    }
     throw new Error('An account already exists for this email. Please log in.')
-  }
-  if (existing && existing.role !== credentials.role) {
-    throw new Error(`This existing account has the ${existing.role} role.`)
   }
 
   const { salt, hash } = await passwordHash(credentials.password)
   const account: UserAccount = {
     email,
-    fullName: existing?.fullName || credentials.fullName.trim(),
+    fullName: credentials.fullName.trim(),
     role: credentials.role,
-    createdAt: existing?.createdAt ?? new Date().toISOString(),
+    createdAt: new Date().toISOString(),
     passwordSalt: salt,
     passwordHash: hash,
     passwordIterations: PASSWORD_ITERATIONS,
   }
-  const users = readUsers()
-  const nextUsers = existing
-    ? users.map((user) => (user.email === email ? account : user))
-    : [...users, account]
+  const nextUsers = [...readUsers(), account]
 
   let profile: StudentProfile | StaffProfile
   if (credentials.role === 'student') {
@@ -323,8 +823,12 @@ export async function registerAccount(
     }
   }
 
+  const currentAccount = getAccount(email)
+  if (currentAccount) {
+    throw new Error('An account already exists for this email. Please log in.')
+  }
   writeStoresOrThrow([
-    [storageKeys.users, nextUsers],
+    [storageKeys.users, [...readUsers(), account]],
     [dataKey(email, credentials.role === 'student' ? 'profile' : 'staffProfile'), profile],
   ])
 }
@@ -333,10 +837,12 @@ export async function loginAccount(
   emailInput: string,
   password: string,
 ): Promise<Session> {
+  if (isSupabaseAuthEnabled) return loginSupabaseAccount(emailInput, password)
+
   const account = getAccount(emailInput)
   if (!account) throw new Error('No local account was found for that email. Create an account on this device.')
   if (!account.passwordHash || !account.passwordSalt) {
-    throw new Error('This older local account has no password. Re-create it with a password to continue.')
+    throw new Error('This older local account has no password. Create an account with the same role to add one.')
   }
   const derived = await derivePasswordHash(password, base64ToBytes(account.passwordSalt))
   if (!timingSafeEqual(derived, base64ToBytes(account.passwordHash))) {
@@ -350,10 +856,13 @@ export async function loginAccount(
 
 export async function requestPasswordReset(emailInput: string): Promise<void> {
   if (!emailInput.trim()) throw new Error('Enter your email address first.')
+  if (isSupabaseAuthEnabled) return requestSupabasePasswordReset(emailInput)
   throw new Error('Password reset is not configured for browser-based accounts. Contact an administrator.')
 }
 
 export async function updatePassword(password: string): Promise<Session> {
+  if (isSupabaseAuthEnabled) return updateSupabasePassword(password)
+
   if (password.length < 6) throw new Error('Password must contain at least 6 characters.')
   const session = await getSession()
   if (!session) throw new Error('No signed-in local account is available.')
@@ -374,6 +883,7 @@ export async function updatePassword(password: string): Promise<Session> {
 }
 
 export async function logoutAccount(): Promise<void> {
+  if (isSupabaseAuthEnabled) return logoutSupabaseAccount()
   removeStore(storageKeys.session)
 }
 
@@ -383,7 +893,9 @@ async function makeUniqueStudentId(accounts: UserAccount[]): Promise<string> {
       .filter((account) => account.role === 'student')
       .map((account) => fetchStudentProfile(account.email)),
   )
-  const existingIds = new Set(profiles.map((profile) => profile.studentId))
+  const existingIds = new Set(
+    profiles.map((profile) => profile.studentId.trim().toLocaleUpperCase()),
+  )
   let studentId = ''
   do {
     const bytes = crypto.getRandomValues(new Uint8Array(8))
@@ -410,51 +922,73 @@ export const EMPTY_STUDENT_PROFILE: StudentProfile = {
 }
 
 export async function fetchStudentProfile(email: string): Promise<StudentProfile> {
-  return readStore<StudentProfile>(
-    dataKey(email, 'profile'),
-    { ...EMPTY_STUDENT_PROFILE, email },
+  if (isSupabaseAuthEnabled) return fetchOwnSupabaseStudentProfile(email)
+
+  const storedEmail = getAccount(email)?.email ?? email
+  const profile = readStore<StudentProfile>(
+    dataKey(storedEmail, 'profile'),
+    { ...EMPTY_STUDENT_PROFILE, email: storedEmail },
   )
+  return { ...profile, email: storedEmail }
 }
 
 export async function submitStudentVerification(
   emailInput: string,
   submittedDetails: VerificationDetails,
 ): Promise<StudentProfile> {
-  const email = emailInput.trim().toLowerCase()
+  if (isSupabaseAuthEnabled) {
+    return submitSupabaseStudentVerification(submittedDetails)
+  }
+
+  const email = normalizeEmail(emailInput)
   const account = getAccount(email)
   const session = await getSession()
-  if (!account || account.role !== 'student' || session?.role !== 'student' || session.email !== email) {
+  if (
+    !account ||
+    account.role !== 'student' ||
+    session?.role !== 'student' ||
+    normalizeEmail(session.email) !== email
+  ) {
     throw new Error('A signed-in student account is required to submit verification.')
   }
 
-  const currentProfile = await fetchStudentProfile(email)
-  if (currentProfile.verificationStatus === 'verified') {
-    throw new Error('This student account has already been verified.')
-  }
-
   const details = validateVerificationDetails(submittedDetails)
-  await assertUniqueStudentRoll(email, details)
-  await assertUniqueStudentId(email, currentProfile.studentId)
-  const updatedProfile: StudentProfile = {
-    ...currentProfile,
-    ...details,
-    verificationStatus: 'pending',
-    verificationNote: '',
-    verificationReviewedBy: '',
-    verificationReviewedAt: '',
-    verifiedAt: '',
-  }
-  writeStoreOrThrow(dataKey(email, 'profile'), updatedProfile)
-  return updatedProfile
+  return withLocalMutationLock('attendpro.unique-identities', async () => {
+    const currentProfile = await fetchStudentProfile(account.email)
+    if (currentProfile.verificationStatus === 'verified') {
+      throw new Error('This student account has already been verified.')
+    }
+
+    await assertUniqueStudentRoll(email, details)
+    await assertUniqueStudentId(email, currentProfile.studentId)
+    const updatedProfile: StudentProfile = {
+      ...currentProfile,
+      ...details,
+      verificationStatus: 'pending',
+      verificationNote: '',
+      verificationReviewedBy: '',
+      verificationReviewedAt: '',
+      verifiedAt: '',
+    }
+    writeStoreOrThrow(dataKey(account.email, 'profile'), updatedProfile)
+    return updatedProfile
+  })
 }
 
 export async function fetchStudentVerificationRecords(
   staffEmailInput: string,
 ): Promise<StudentVerificationRecord[]> {
-  const staffEmail = staffEmailInput.trim().toLowerCase()
+  if (isSupabaseAuthEnabled) return fetchSupabaseStudentVerificationRecords()
+
+  const staffEmail = normalizeEmail(staffEmailInput)
   const staff = getAccount(staffEmail)
   const session = await getSession()
-  if (!staff || staff.role !== 'staff' || session?.role !== 'staff' || session.email !== staffEmail) {
+  if (
+    !staff ||
+    staff.role !== 'staff' ||
+    session?.role !== 'staff' ||
+    normalizeEmail(session.email) !== staffEmail
+  ) {
     throw new Error('A signed-in staff account is required to review student verification.')
   }
 
@@ -475,6 +1009,7 @@ export async function fetchStudentVerificationRecords(
     section: profile.section ?? '',
     status: profile.verificationStatus ?? 'not_submitted',
     note: profile.verificationNote ?? '',
+    enrolledSubjects: readSubjects(account.email).map(({ name, code }) => ({ name, code })),
   }))
 }
 
@@ -484,85 +1019,124 @@ export async function reviewStudentVerification(
   decision: Extract<StudentVerificationStatus, 'verified' | 'rejected'>,
   note = '',
 ): Promise<StudentProfile> {
-  const staffEmail = staffEmailInput.trim().toLowerCase()
-  const studentEmail = studentEmailInput.trim().toLowerCase()
+  if (isSupabaseAuthEnabled) {
+    return reviewSupabaseStudentVerification(studentEmailInput, decision, note)
+  }
+
+  const staffEmail = normalizeEmail(staffEmailInput)
+  const studentEmail = normalizeEmail(studentEmailInput)
   const staff = getAccount(staffEmail)
   const student = getAccount(studentEmail)
   const session = await getSession()
-  if (!staff || staff.role !== 'staff' || session?.role !== 'staff' || session.email !== staffEmail) {
+  if (
+    !staff ||
+    staff.role !== 'staff' ||
+    session?.role !== 'staff' ||
+    normalizeEmail(session.email) !== staffEmail
+  ) {
     throw new Error('A signed-in staff account is required to review student verification.')
   }
   if (!student || student.role !== 'student') {
     throw new Error('The student account could not be found in this browser.')
   }
 
-  const profile = await fetchStudentProfile(studentEmail)
-  if (profile.verificationStatus !== 'pending') {
-    throw new Error('Only pending student verification requests can be reviewed.')
-  }
-  if (decision === 'verified') {
-    await assertUniqueStudentRoll(studentEmail, validateVerificationDetails(profile))
-    await assertUniqueStudentId(studentEmail, profile.studentId)
-  }
   const reviewerNote = note.trim()
   if (reviewerNote.length > 240) throw new Error('Review notes must be 240 characters or fewer.')
-  const now = new Date().toISOString()
-  const updatedProfile: StudentProfile = {
-    ...profile,
-    verificationStatus: decision,
-    verificationNote: reviewerNote,
-    verificationReviewedBy: staffEmail,
-    verificationReviewedAt: now,
-    verifiedAt: decision === 'verified' ? now : '',
-  }
-  writeStoreOrThrow(dataKey(studentEmail, 'profile'), updatedProfile)
-  return updatedProfile
+  return withLocalMutationLock('attendpro.unique-identities', async () => {
+    const profile = await fetchStudentProfile(student.email)
+    if (profile.verificationStatus !== 'pending') {
+      throw new Error('Only pending student verification requests can be reviewed.')
+    }
+    if (decision === 'verified') {
+      await assertUniqueStudentRoll(studentEmail, validateVerificationDetails(profile))
+      await assertUniqueStudentId(studentEmail, profile.studentId)
+    }
+    const now = new Date().toISOString()
+    const updatedProfile: StudentProfile = {
+      ...profile,
+      verificationStatus: decision,
+      verificationNote: reviewerNote,
+      verificationReviewedBy: staffEmail,
+      verificationReviewedAt: now,
+      verifiedAt: decision === 'verified' ? now : '',
+    }
+    writeStoreOrThrow(dataKey(student.email, 'profile'), updatedProfile)
+    return updatedProfile
+  })
 }
 
 export async function saveStudentProfile(
   email: string,
   profile: StudentProfile,
 ): Promise<StudentProfile> {
-  const currentProfile = await fetchStudentProfile(email)
-  const savedProfile: StudentProfile = {
-    ...profile,
-    fullName:
-      currentProfile.verificationStatus === 'verified'
-        ? currentProfile.fullName
-        : profile.fullName,
-    studentId: currentProfile.studentId || profile.studentId,
-    rollNumber: currentProfile.rollNumber,
-    department: currentProfile.department,
-    year: currentProfile.year,
-    section: currentProfile.section,
-    verificationStatus: currentProfile.verificationStatus ?? 'not_submitted',
-    verificationNote: currentProfile.verificationNote,
-    verificationReviewedBy: currentProfile.verificationReviewedBy,
-    verificationReviewedAt: currentProfile.verificationReviewedAt,
-    verifiedAt: currentProfile.verifiedAt,
-  }
-  writeStoreOrThrow(dataKey(email, 'profile'), savedProfile)
-  const account = getAccount(email)
-  if (account) {
-    writeStore(
-      storageKeys.users,
-      readUsers().map((user) =>
-        user.email === email ? { ...user, fullName: savedProfile.fullName || user.fullName } : user,
-      ),
-    )
-  }
+  if (isSupabaseAuthEnabled) return saveOwnSupabaseStudentProfile(profile)
 
-  // Keep the shared roster's name/roll/course in sync. This is best-effort:
-  // a network hiccup must not block editing the local profile.
-  if (shouldUseSharedAttendance(email)) {
-    try {
-      await updateSharedIdentity(email, identityFromProfile(savedProfile))
-    } catch (error) {
-      // The next profile save or roster fetch retries.
+  const normalizedEmail = normalizeEmail(email)
+  const account = getAccount(normalizedEmail)
+  const session = await getSession()
+  if (
+    !account ||
+    account.role !== 'student' ||
+    session?.role !== 'student' ||
+    normalizeEmail(session.email) !== normalizedEmail
+  ) {
+    throw new Error('A signed-in student account is required to save this profile.')
+  }
+  return withLocalMutationLock('attendpro.unique-identities', async () => {
+    const currentProfile = await fetchStudentProfile(account.email)
+    const studentId = currentProfile.studentId || profile.studentId
+    await assertUniqueStudentId(normalizedEmail, studentId)
+    if (
+      currentProfile.rollNumber &&
+      currentProfile.department &&
+      currentProfile.year &&
+      currentProfile.section
+    ) {
+      await assertUniqueStudentRoll(
+        normalizedEmail,
+        validateVerificationDetails(currentProfile),
+      )
     }
-  }
+    const savedProfile: StudentProfile = {
+      ...profile,
+      fullName:
+        currentProfile.verificationStatus === 'verified'
+          ? currentProfile.fullName
+          : profile.fullName,
+      email: account.email,
+      studentId,
+      rollNumber: currentProfile.rollNumber,
+      department: currentProfile.department,
+      year: currentProfile.year,
+      section: currentProfile.section,
+      verificationStatus: currentProfile.verificationStatus ?? 'not_submitted',
+      verificationNote: currentProfile.verificationNote,
+      verificationReviewedBy: currentProfile.verificationReviewedBy,
+      verificationReviewedAt: currentProfile.verificationReviewedAt,
+      verifiedAt: currentProfile.verifiedAt,
+    }
+    writeStoresOrThrow([
+      [dataKey(account.email, 'profile'), savedProfile],
+      [
+        storageKeys.users,
+        readUsers().map((user) =>
+          normalizeEmail(user.email) === normalizedEmail
+            ? { ...user, fullName: savedProfile.fullName || user.fullName }
+            : user,
+        ),
+      ],
+    ])
 
-  return savedProfile
+    if (shouldUseSharedAttendance(account.email)) {
+      try {
+        await updateSharedIdentity(account.email, identityFromProfile(savedProfile))
+      } catch {
+        // The next profile save or roster fetch retries.
+      }
+    }
+
+    return savedProfile
+  })
 }
 
 function identityFromProfile(profile: StudentProfile): SharedIdentity {
@@ -598,6 +1172,7 @@ function writeSubjects(email: string, subjects: Subject[]): void {
 const sharedImportCache = new Map<string, Promise<void>>()
 
 export async function ensureSharedAttendanceReady(email: string): Promise<void> {
+  if (isSupabaseAuthEnabled) return
   if (!shouldUseSharedAttendance(email) || !email) return
 
   const key = email.toLowerCase()
@@ -631,6 +1206,7 @@ export async function fetchSubjects(email: string): Promise<Subject[]> {
       await ensureSharedAttendanceReady(email)
       return await fetchSharedSubjects(email)
     } catch (error) {
+      if (isSupabaseAuthEnabled) throw error
       // Offline or schema not applied yet — keep the local cache usable.
     }
   }
@@ -660,13 +1236,15 @@ export async function createSubject(
       subject,
       identity: identityFromProfile(profile),
     })
-    const savedKey = subjectKey(saved.name, saved.code)
-    writeSubjects(email, [
-      saved,
-      ...readSubjects(email).filter(
-        (item) => item.id !== saved.id && subjectKey(item.name, item.code) !== savedKey,
-      ),
-    ])
+    if (!isSupabaseAuthEnabled) {
+      const savedKey = subjectKey(saved.name, saved.code)
+      writeSubjects(email, [
+        saved,
+        ...readSubjects(email).filter(
+          (item) => item.id !== saved.id && subjectKey(item.name, item.code) !== savedKey,
+        ),
+      ])
+    }
     return saved
   }
 
@@ -678,23 +1256,31 @@ export async function updateSubject(
   email: string,
   subject: Subject,
 ): Promise<Subject> {
+  const normalizedSubject = {
+    ...subject,
+    name: subject.name.trim(),
+    code: subject.code.trim(),
+    faculty: subject.faculty.trim(),
+  }
   if (shouldUseSharedAttendance(email)) {
     await ensureSharedAttendanceReady(email)
-    const saved = await updateSharedSubject(email, subject)
-    writeSubjects(
-      email,
-      readSubjects(email).map((item) =>
-        item.id === subject.id || item.id === saved.id ? saved : item,
-      ),
-    )
+    const saved = await updateSharedSubject(email, normalizedSubject)
+    if (!isSupabaseAuthEnabled) {
+      writeSubjects(
+        email,
+        readSubjects(email).map((item) =>
+          item.id === normalizedSubject.id || item.id === saved.id ? saved : item,
+        ),
+      )
+    }
     return saved
   }
 
   writeSubjects(
     email,
-    readSubjects(email).map((item) => (item.id === subject.id ? subject : item)),
+    readSubjects(email).map((item) => (item.id === normalizedSubject.id ? normalizedSubject : item)),
   )
-  return subject
+  return normalizedSubject
 }
 
 export async function deleteSubject(email: string, subjectId: string): Promise<void> {
@@ -702,6 +1288,8 @@ export async function deleteSubject(email: string, subjectId: string): Promise<v
     await ensureSharedAttendanceReady(email)
     await deleteSharedSubject(email, subjectId)
   }
+
+  if (isSupabaseAuthEnabled) return
 
   writeSubjects(
     email,
@@ -729,9 +1317,16 @@ export function hasLocalAttendanceRecord(
   subjectId: string,
   date: string,
 ): boolean {
-  return readRecords(studentEmail).some(
+  const storedEmail = getAccount(studentEmail)?.email ?? studentEmail
+  return readRecords(storedEmail).some(
     (record) => record.subjectId === subjectId && record.date === date,
   )
+}
+
+function isValidAttendanceDate(date: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false
+  const parsedDate = new Date(`${date}T00:00:00.000Z`)
+  return Number.isFinite(parsedDate.getTime()) && parsedDate.toISOString().slice(0, 10) === date
 }
 
 export async function fetchAttendanceRecords(
@@ -743,6 +1338,7 @@ export async function fetchAttendanceRecords(
       const records = await fetchSharedRecords(email)
       return records.sort((a, b) => b.date.localeCompare(a.date))
     } catch (error) {
+      if (isSupabaseAuthEnabled) throw error
       // Offline or schema not applied yet — keep the local cache usable.
     }
   }
@@ -756,6 +1352,33 @@ export async function logAttendance(
   status: AttendanceStatus,
   date: string,
 ): Promise<Subject | null> {
+  if (!subjectId.trim()) throw new Error('Choose a subject before recording attendance.')
+  if (!isValidAttendanceDate(date)) throw new Error('Choose a valid attendance date.')
+  if (!['present', 'absent', 'late', 'cancelled'].includes(status)) {
+    throw new Error('Choose a valid attendance status.')
+  }
+  const account = isSupabaseAuthEnabled ? null : getAccount(email)
+  const session = await getSession()
+  if (isSupabaseAuthEnabled) {
+    if (
+      session?.role !== 'student' ||
+      normalizeEmail(session.email) !== normalizeEmail(email)
+    ) {
+      throw new Error('A signed-in student account is required to record attendance.')
+    }
+  } else {
+    if (
+      account &&
+      (account.role !== 'student' ||
+        session?.role !== 'student' ||
+        normalizeEmail(session.email) !== normalizeEmail(account.email))
+    ) {
+      throw new Error('A signed-in student account is required to record attendance.')
+    }
+    if (!account && !shouldUseSharedAttendance(email)) {
+      throw new Error('A registered student account is required to record attendance.')
+    }
+  }
   const recordId = makeId('att')
 
   if (shouldUseSharedAttendance(email)) {
@@ -767,36 +1390,50 @@ export async function logAttendance(
       date,
       recordId,
     })
-    const record: AttendanceRecord = { id: recordId, subjectId: subject.id, date, status }
-    writeStore(dataKey(email, 'attendance.records'), [
-      record,
-      ...readRecords(email).filter((item) => item.id !== recordId),
-    ])
-    writeSubjects(
-      email,
-      readSubjects(email).map((item) => (item.id === subject.id ? subject : item)),
-    )
+    if (!isSupabaseAuthEnabled) {
+      const record: AttendanceRecord = { id: recordId, subjectId: subject.id, date, status }
+      writeStore(dataKey(email, 'attendance.records'), [
+        record,
+        ...readRecords(email).filter((item) => item.id !== recordId),
+      ])
+      writeSubjects(
+        email,
+        readSubjects(email).map((item) => (item.id === subject.id ? subject : item)),
+      )
+    }
     return subject
   }
 
-  const record: AttendanceRecord = { id: recordId, subjectId, date, status }
-  writeStore(dataKey(email, 'attendance.records'), [record, ...readRecords(email)])
+  const storedEmail = account?.email ?? email
+  return withLocalMutationLock(
+    `attendpro.attendance.${normalizeEmail(storedEmail)}.${subjectId}.${date}`,
+    () => {
+      const records = readRecords(storedEmail)
+      if (records.some((record) => record.subjectId === subjectId && record.date === date)) {
+        throw new Error('Attendance has already been recorded for this student, subject, and date.')
+      }
 
-  const subjects = readSubjects(email)
-  const target = subjects.find((item) => item.id === subjectId)
-  if (!target) return null
+      const subjects = readSubjects(storedEmail)
+      const target = subjects.find((item) => item.id === subjectId)
+      if (!target) throw new Error('The student is not enrolled in this subject.')
 
-  const counts = status !== 'cancelled'
-  const updated: Subject = {
-    ...target,
-    held: target.held + (counts ? 1 : 0),
-    attended: target.attended + (status === 'present' || status === 'late' ? 1 : 0),
-  }
-  writeSubjects(
-    email,
-    subjects.map((item) => (item.id === subjectId ? updated : item)),
+      const record: AttendanceRecord = { id: recordId, subjectId, date, status }
+      const counts = status !== 'cancelled'
+      const updated: Subject = {
+        ...target,
+        held: target.held + (counts ? 1 : 0),
+        attended: target.attended + (status === 'present' || status === 'late' ? 1 : 0),
+      }
+      writeStoresOrThrow([
+        [dataKey(storedEmail, 'attendance.records'), [record, ...records]],
+        [
+          dataKey(storedEmail, 'subjects'),
+          subjects.map((item) => (item.id === subjectId ? updated : item)),
+        ],
+      ])
+      return updated
+    },
   )
-  return updated
 }
 
 export async function confirmLocalStaffAttendance(
@@ -823,18 +1460,19 @@ export async function confirmLocalStaffAttendance(
   if (studentProfile.verificationStatus !== 'verified') {
     throw new Error('Only verified students can be marked present through camera attendance.')
   }
-  const parsedDate = /^\d{4}-\d{2}-\d{2}$/.test(date)
-    ? new Date(`${date}T00:00:00.000Z`)
-    : null
-  if (!parsedDate || !Number.isFinite(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== date) {
-    throw new Error('Choose a valid attendance date.')
-  }
+  if (!isValidAttendanceDate(date)) throw new Error('Choose a valid attendance date.')
 
   const studentSubject = readSubjects(student.email).find((item) => item.id === subjectId)
   if (!studentSubject) throw new Error('The student is not enrolled in this subject.')
   const staffProfile = await fetchStaffProfile(staff.email)
   const isAssigned = staffProfile.subjects.some(
-    (subject) => subjectKey(subject.name, subject.code) === subjectKey(studentSubject.name, studentSubject.code),
+    (subject) =>
+      matchesSubjectIdentity(
+        studentSubject.name,
+        studentSubject.code,
+        subject.name,
+        subject.code,
+      ),
   )
   if (!isAssigned) throw new Error('This subject is not assigned to the staff account.')
 
@@ -868,14 +1506,10 @@ export async function confirmLocalStaffAttendance(
     ])
   }
 
-  if (typeof navigator !== 'undefined' && navigator.locks) {
-    await navigator.locks.request(
-      `attendpro.attendance.${student.email}.${subjectId}.${date}`,
-      save,
-    )
-  } else {
-    save()
-  }
+  await withLocalMutationLock(
+    `attendpro.attendance.${normalizeEmail(student.email)}.${subjectId}.${date}`,
+    save,
+  )
 }
 
 /** Lets staff correct a student's counters — the student sees it on next read. */
@@ -894,12 +1528,14 @@ export async function setSubjectCounters(
       attended,
       reason,
     )
-    writeSubjects(
-      studentEmail,
-      readSubjects(studentEmail).map((item) =>
-        item.id === subjectId || item.id === saved.id ? saved : item,
-      ),
-    )
+    if (!isSupabaseAuthEnabled) {
+      writeSubjects(
+        studentEmail,
+        readSubjects(studentEmail).map((item) =>
+          item.id === subjectId || item.id === saved.id ? saved : item,
+        ),
+      )
+    }
     return saved
   }
 
@@ -1056,7 +1692,16 @@ export async function deleteProductivityGoal(email: string, goalId: string): Pro
  * ================================================================== */
 
 export async function fetchStaffProfile(email: string): Promise<StaffProfile> {
-  const local = readStore<StaffProfile>(dataKey(email, 'staffProfile'), {
+  if (isSupabaseAuthEnabled) {
+    const profile = await fetchOwnSupabaseStaffProfile(email)
+    if (isAttendanceSyncConfigured) {
+      profile.subjects = await fetchSharedStaffSubjects(email)
+    }
+    return profile
+  }
+
+  const storedEmail = getAccount(email)?.email ?? email
+  const local = readStore<StaffProfile>(dataKey(storedEmail, 'staffProfile'), {
     fullName: '',
     email,
     staffId: '',
@@ -1095,10 +1740,40 @@ export async function saveStaffProfile(
   email: string,
   profile: StaffProfile,
 ): Promise<StaffProfile> {
-  const saved = shouldUseSharedAttendance(email)
-    ? { ...profile, subjects: await fetchSharedStaffSubjects(email) }
-    : profile
-  writeStore(dataKey(email, 'staffProfile'), saved)
+  if (isSupabaseAuthEnabled) return saveOwnSupabaseStaffProfile(profile)
+
+  const normalizedEmail = normalizeEmail(email)
+  const account = getAccount(normalizedEmail)
+  const session = await getSession()
+  if (
+    !account ||
+    account.role !== 'staff' ||
+    session?.role !== 'staff' ||
+    normalizeEmail(session.email) !== normalizedEmail
+  ) {
+    throw new Error('A signed-in staff account is required to save this profile.')
+  }
+  if (profile.staffId.trim().length > 32) {
+    throw new Error('Staff ID must be 32 characters or fewer.')
+  }
+  const saved = shouldUseSharedAttendance(normalizedEmail)
+    ? { ...profile, subjects: await fetchSharedStaffSubjects(account.email) }
+    : {
+        ...profile,
+        subjects: profile.subjects.map((subject) => ({
+          ...subject,
+          name: subject.name.trim(),
+          code: subject.code.trim(),
+          semester: subject.semester.trim(),
+        })),
+      }
+  await withLocalMutationLock('attendpro.unique-identities', async () => {
+    await assertUniqueStaffId(normalizedEmail, saved.staffId)
+    writeStoreOrThrow(dataKey(account.email, 'staffProfile'), {
+      ...saved,
+      email: normalizedEmail,
+    })
+  })
   return saved
 }
 
@@ -1168,7 +1843,6 @@ export interface StaffSubjectAnalytics {
 
 interface SubjectBucket {
   key: string
-  nameKey: string
   name: string
   code: string
   semester: string
@@ -1187,7 +1861,6 @@ function emptySubjectBuckets(profile: StaffProfile): Map<string, SubjectBucket> 
     const key = subjectKey(taught.name, taught.code)
     buckets.set(key, {
       key,
-      nameKey: subjectKey(taught.name),
       name: taught.name,
       code: taught.code,
       semester: taught.semester,
@@ -1196,6 +1869,20 @@ function emptySubjectBuckets(profile: StaffProfile): Map<string, SubjectBucket> 
     })
   }
   return buckets
+}
+
+function findSubjectBucket(
+  buckets: Map<string, SubjectBucket>,
+  subject: Pick<Subject, 'name' | 'code'>,
+): SubjectBucket | undefined {
+  const candidates = [...buckets.values()].filter((bucket) =>
+    matchesSubjectIdentity(subject.name, subject.code, bucket.name, bucket.code),
+  )
+  return (
+    candidates.find(
+      (bucket) => subjectKey(bucket.name, bucket.code) === subjectKey(subject.name, subject.code),
+    ) ?? candidates[0]
+  )
 }
 
 function bucketsToSubjects(
@@ -1226,17 +1913,13 @@ function rosterFromSharedRows(
   rows: StudentAttendanceRow[]
 } {
   const buckets = emptySubjectBuckets(profile)
-  const byNameKey = new Map<string, SubjectBucket>()
-  for (const bucket of buckets.values()) {
-    if (!byNameKey.has(bucket.nameKey)) byNameKey.set(bucket.nameKey, bucket)
-  }
-
   const rows: StudentAttendanceRow[] = []
 
   for (const row of sharedRows) {
-    const fullKey = row.subjectKey || subjectKey(row.subjectName, row.subjectCode)
-    const bucket =
-      buckets.get(fullKey) ?? byNameKey.get(subjectKey(row.subjectName))
+    const bucket = findSubjectBucket(buckets, {
+      name: row.subjectName,
+      code: row.subjectCode,
+    })
     if (!bucket) continue // student is not in one of my subjects
 
     const percent = percentOf(row.held, row.attended)
@@ -1247,8 +1930,11 @@ function rosterFromSharedRows(
       studentEmail: row.studentEmail,
       studentName: row.studentName || row.studentEmail,
       studentId: row.studentId || '-',
-      department: row.studentCourse || '-',
-      year: row.studentYear || '-',
+      department: row.department || row.studentCourse || '-',
+      year: row.year || row.studentYear || '-',
+      rollNumber: row.rollNumber || '-',
+      section: row.section || '-',
+      verificationStatus: row.verificationStatus ?? 'not_submitted',
       subjectId: row.subjectId,
       subjectName: row.subjectName,
       subjectCode: row.subjectCode,
@@ -1276,8 +1962,7 @@ async function rosterFromLocal(email: string): Promise<{
   for (const student of students) {
     const studentProfile = await fetchStudentProfile(student.email)
     for (const subject of readSubjects(student.email)) {
-      const key = subjectKey(subject.name, subject.code)
-      const bucket = buckets.get(key)
+      const bucket = findSubjectBucket(buckets, subject)
       if (!bucket) continue // student not in one of my subjects
 
       const percent = percentOf(subject.held, subject.attended)
@@ -1324,6 +2009,31 @@ export async function fetchStaffRoster(email: string): Promise<{
 
     try {
       const sharedRows = await fetchStaffAttendanceRows(email)
+      if (isSupabaseAuthEnabled) {
+        const verificationRecords = await fetchStudentVerificationRecords(email)
+        const verificationByEmail = new Map(
+          verificationRecords.map((record) => [normalizeEmail(record.email), record]),
+        )
+        return rosterFromSharedRows(
+          profile,
+          sharedRows.map((row) => {
+            const verification = verificationByEmail.get(normalizeEmail(row.studentEmail))
+            return {
+              ...row,
+              studentId: '-',
+              ...(verification
+                ? {
+                    rollNumber: verification.rollNumber,
+                    department: verification.department,
+                    year: verification.year,
+                    section: verification.section,
+                    verificationStatus: verification.status,
+                  }
+                : {}),
+            }
+          }),
+        )
+      }
       return rosterFromSharedRows(profile, sharedRows)
     } catch (error) {
       sharedError = error
@@ -1332,6 +2042,12 @@ export async function fetchStaffRoster(email: string): Promise<{
     // Fall back to this device's cache only when it actually has rows. An
     // empty local roster would misleadingly render "0 Students" when the
     // shared query failed, hiding the real problem from staff.
+    if (isSupabaseAuthEnabled) {
+      throw sharedError instanceof Error
+        ? sharedError
+        : new Error('Could not load the shared student roster. Check your connection and try again.')
+    }
+
     const localRoster = await rosterFromLocal(email)
     if (localRoster.rows.length > 0) {
       return localRoster

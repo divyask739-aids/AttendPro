@@ -13,10 +13,20 @@ import {
   useStudentVerificationReview,
   useVisibleActivities,
 } from '@/hooks/useStaffData'
-import { createActivity, isLocalAccount, setSubjectCounters } from '@/lib/dataApi'
+import {
+  createActivity,
+  isLocalAccount,
+  setSubjectCounters,
+} from '@/lib/dataApi'
 import { riskTone, RISK_LABEL, RISK_TONE, percentToRisk } from '@/lib/attendance'
 import { addDaysISO, isoToday } from '@/lib/date'
-import type { AcademicActivity, StudentVerificationStatus, TaskPriority } from '@/types'
+import { matchesSubjectIdentity } from '@/lib/subjectKey'
+import type {
+  AcademicActivity,
+  StudentVerificationRecord,
+  StudentVerificationStatus,
+  TaskPriority,
+} from '@/types'
 
 function RosterErrorNotice({ error }: { error: unknown }) {
   return (
@@ -251,11 +261,18 @@ export function StaffStudentsPage({ email }: { email: string }) {
       <header>
         <h1 className="text-xl font-bold tracking-tight text-slate-900 lg:text-2xl">Students</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Only students enrolled in your subjects, using their own recorded attendance.
+          Review registered student verification requests and attendance for students in your subjects.
         </p>
       </header>
 
       <div className="mt-4 space-y-4">
+        <RegisteredStudents
+          records={verificationRecords}
+          subjects={subjects}
+          isLoading={verificationsLoading}
+          isError={verificationsError}
+          error={verificationError}
+        />
         <section aria-label="Student verification review">
           <Card title="Student verification review">
             {verificationsLoading ? (
@@ -392,7 +409,7 @@ export function StaffStudentsPage({ email }: { email: string }) {
         ) : visible.length === 0 ? (
           <EmptyState
             title="No students found."
-            description="Students appear here after they join one of your classes with its code."
+            description="This attendance list shows only enrolled students. Check the registered-student list above; students must add a matching subject to their own account, and subject assignments do not enroll students automatically."
           />
         ) : (
           <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -434,6 +451,174 @@ export function StaffStudentsPage({ email }: { email: string }) {
         )}
       </div>
     </div>
+  )
+}
+
+function RegisteredStudents({
+  records,
+  subjects,
+  isLoading,
+  isError,
+  error,
+}: {
+  records: StudentVerificationRecord[]
+  subjects: Array<{ key: string; name: string; code: string }>
+  isLoading: boolean
+  isError: boolean
+  error: unknown
+}) {
+  const [subjectKey, setSubjectKey] = useState('')
+  const [department, setDepartment] = useState('')
+  const [year, setYear] = useState('')
+  const [section, setSection] = useState('')
+  const selectedSubject = subjects.find((subject) => subject.key === subjectKey)
+  const departments = [...new Set(records.map((record) => record.department.trim()).filter(Boolean))].sort()
+  const years = [...new Set(records.map((record) => record.year.trim()).filter(Boolean))].sort()
+  const sections = [...new Set(records.map((record) => record.section.trim()).filter(Boolean))].sort()
+  const filtered = records.filter((record) => {
+    if (department && record.department.trim() !== department) return false
+    if (year && record.year.trim() !== year) return false
+    if (section && record.section.trim() !== section) return false
+    return true
+  })
+  const isEnrolledInSelectedSubject = (record: StudentVerificationRecord) =>
+    Boolean(
+      selectedSubject &&
+        record.enrolledSubjects.some((studentSubject) =>
+          matchesSubjectIdentity(
+            studentSubject.name,
+            studentSubject.code,
+            selectedSubject.name,
+            selectedSubject.code,
+          ),
+        ),
+    )
+
+  const selectClass =
+    'rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100'
+
+  return (
+    <Card title="Registered students and subject enrollment">
+      <p className="text-sm text-slate-600">
+        Registered accounts are listed separately from enrollment. A student is marked enrolled
+        only when their student record contains a subject matching an assigned subject code; no
+        students are enrolled automatically.
+      </p>
+      <p className="mt-1 text-xs text-slate-500">
+        Subject codes are compared without case, punctuation, or extra-space differences. Legacy
+        subject records without a code are matched by name. This list reflects accounts available
+        in this browser; localStorage does not sync accounts between devices.
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <label className="sr-only" htmlFor="registered-students-subject">Assigned subject</label>
+        <select
+          id="registered-students-subject"
+          value={subjectKey}
+          onChange={(event) => setSubjectKey(event.target.value)}
+          className={selectClass}
+        >
+          <option value="">All registered students</option>
+          {subjects.map((subject) => (
+            <option key={subject.key} value={subject.key}>
+              {subject.name}{subject.code ? ` (${subject.code})` : ''}
+            </option>
+          ))}
+        </select>
+        <FilterSelect id="registered-students-department" label="Department" value={department} onChange={setDepartment} options={departments} className={selectClass} />
+        <FilterSelect id="registered-students-year" label="Year" value={year} onChange={setYear} options={years} className={selectClass} />
+        <FilterSelect id="registered-students-section" label="Section" value={section} onChange={setSection} options={sections} className={selectClass} />
+      </div>
+      {isLoading ? (
+        <p className="mt-4 text-sm text-slate-500">Loading registered students...</p>
+      ) : isError ? (
+        <p role="alert" className="mt-4 text-sm text-rose-700">
+          {error instanceof Error ? error.message : 'Could not load registered student accounts.'}
+        </p>
+      ) : records.length === 0 ? (
+        <p className="mt-4 text-sm text-slate-500">
+          No student accounts are registered in this browser. Accounts on other devices are not
+          visible to this localStorage-based portal.
+        </p>
+      ) : filtered.length === 0 ? (
+        <p className="mt-4 text-sm text-slate-500">
+          No registered students match the selected department, year, and section filters.
+        </p>
+      ) : (
+        <div className="mt-4 overflow-x-auto rounded-xl border border-slate-200">
+          <table className="w-full min-w-[920px] text-left text-sm">
+            <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
+              <tr>
+                <th className="px-3 py-2.5 font-medium">Student</th>
+                <th className="px-3 py-2.5 font-medium">Roll number</th>
+                <th className="px-3 py-2.5 font-medium">Department</th>
+                <th className="px-3 py-2.5 font-medium">Year</th>
+                <th className="px-3 py-2.5 font-medium">Section</th>
+                <th className="px-3 py-2.5 font-medium">Verification</th>
+                {selectedSubject && <th className="px-3 py-2.5 font-medium">Enrollment</th>}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {filtered.map((record) => {
+                const enrolled = isEnrolledInSelectedSubject(record)
+                return (
+                  <tr key={record.email}>
+                    <td className="px-3 py-2.5">
+                      <p className="font-medium text-slate-800">{record.fullName || 'Name not set'}</p>
+                      <p className="text-xs text-slate-500">{record.email}</p>
+                    </td>
+                    <td className="px-3 py-2.5 text-slate-600">{record.rollNumber || 'Not provided'}</td>
+                    <td className="px-3 py-2.5 text-slate-600">{record.department || 'Not provided'}</td>
+                    <td className="px-3 py-2.5 text-slate-600">{record.year || 'Not provided'}</td>
+                    <td className="px-3 py-2.5 text-slate-600">{record.section || 'Not provided'}</td>
+                    <td className="px-3 py-2.5"><VerificationBadge status={record.status} /></td>
+                    {selectedSubject && (
+                      <td className="px-3 py-2.5">
+                        <Badge tone={enrolled ? 'success' : 'neutral'}>
+                          {enrolled ? 'Enrolled' : 'Not enrolled'}
+                        </Badge>
+                      </td>
+                    )}
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {selectedSubject && records.length > 0 && !records.some(isEnrolledInSelectedSubject) && (
+        <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          No registered student is enrolled in {selectedSubject.name}
+          {selectedSubject.code ? ` (${selectedSubject.code})` : ''}. Students must add this subject
+          to their own account; adding a staff assignment does not enroll them.
+        </p>
+      )}
+    </Card>
+  )
+}
+
+function FilterSelect({
+  id,
+  label,
+  value,
+  onChange,
+  options,
+  className,
+}: {
+  id: string
+  label: string
+  value: string
+  onChange: (value: string) => void
+  options: string[]
+  className: string
+}) {
+  return (
+    <>
+      <label className="sr-only" htmlFor={id}>{label}</label>
+      <select id={id} value={value} onChange={(event) => onChange(event.target.value)} className={className}>
+        <option value="">All {label.toLowerCase()}s</option>
+        {options.map((option) => <option key={option} value={option}>{option}</option>)}
+      </select>
+    </>
   )
 }
 
@@ -483,7 +668,7 @@ export function StaffAttendancePage({ email }: { email: string }) {
           Attendance
         </h1>
         <p className="mt-1 text-sm text-slate-500">
-          Start a live attendance code for students, or correct a student's classes held/attended.
+          Manually confirm verified students from the camera roster or correct attendance records.
         </p>
       </header>
 

@@ -12,6 +12,7 @@ import {
   type IconProps,
 } from '@/components/icons'
 import type { UserRole } from '@/types'
+import { isSupabaseAuthEnabled } from '@/lib/supabase'
 
 export interface NavItem {
   to: string
@@ -37,6 +38,9 @@ export const ROLE_NAV: Record<UserRole, NavItem[]> = {
     { to: '/staff/students', label: 'Students', icon: UsersIcon },
     { to: '/staff/attendance', label: 'Attendance', icon: CalendarIcon },
     { to: '/staff/activities', label: 'Activities', icon: TasksIcon },
+    ...(isSupabaseAuthEnabled
+      ? [{ to: '/staff/access', label: 'Staff Access', icon: UsersIcon }]
+      : []),
     { to: '/profile', label: 'Profile', icon: TargetIcon },
   ],
 }

@@ -10,10 +10,26 @@ function normalize(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '')
 }
 
+export function normalizeSubjectCode(code: string | undefined): string {
+  return normalize(code ?? '')
+}
+
 export function subjectKey(name: string, code?: string): string {
   const cleanName = normalize(name)
-  const cleanCode = normalize(code ?? '')
+  const cleanCode = normalizeSubjectCode(code)
   return cleanCode ? `${cleanCode}:${cleanName}` : cleanName
+}
+
+export function matchesSubjectIdentity(
+  candidateName: string,
+  candidateCode: string | undefined,
+  targetName: string,
+  targetCode: string | undefined,
+): boolean {
+  const candidateCodeKey = normalizeSubjectCode(candidateCode)
+  const targetCodeKey = normalizeSubjectCode(targetCode)
+  if (candidateCodeKey && targetCodeKey) return candidateCodeKey === targetCodeKey
+  return normalize(candidateName) === normalize(targetName)
 }
 
 export function matchesSubjectKey(

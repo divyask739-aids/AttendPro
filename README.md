@@ -6,17 +6,21 @@ activities, tasks, reminders, goals, planning, and productivity.
 ## Architecture
 
 - React 19, TypeScript, Vite, Tailwind CSS, and React Router.
-- Accounts, profiles, subjects, attendance, tasks, goals, planner, and activities
-  use the existing email-namespaced `localStorage` architecture. Browser-local
-  data does not sync to other devices.
-- Camera attendance uses local MediaPipe face detection and QR scanning. Faces
-  are never recognized or matched to identities; frames are not stored or
-  uploaded. Staff manually verify students and confirm attendance.
-- Local authentication stores salted PBKDF2 password hashes, not plaintext
+- The default application keeps its existing email-namespaced accounts and
+  data in `localStorage`; browser-local data does not sync to other devices.
+  Staging can opt into Supabase Auth for accounts and profiles, while several
+  modules remain browser-local pending their shared-data migration.
+- Student verification and staff camera attendance use local MediaPipe face
+  detection as a visual presence aid only. Faces are never recognized or matched
+  to identities; frames are not stored or uploaded. Staff manually identify
+  students from the verified roster and confirm attendance.
+- Default local authentication stores salted PBKDF2 hashes, not plaintext
   passwords. Browser storage and client-side roles remain user-editable and are
-  not secure authentication for production.
-- The repository retains separate legacy Supabase sync code for cross-device
-  live attendance. The local camera attendance flow does not use it.
+  not production-secure. Staging-only Supabase Auth is enabled separately and
+  requires its own project configuration and reviewed database migration.
+- The default local camera attendance flow writes to this browser only.
+  Staging Auth uses shared attendance sessions and the staff-confirmation RPC
+  for camera-assisted attendance; it does not recognize faces.
 
 ## Development
 
@@ -35,10 +39,12 @@ localhost. For camera details and local limitations, see
 ## Setup and operations
 
 - [Legacy shared attendance setup](docs/attendance-sync-setup.md)
+- [Supabase Auth staging setup](docs/supabase-staging-auth-setup.md)
 
-Supabase is not required for account registration or camera attendance. Existing
-Supabase accounts cannot be transparently converted to local accounts; accounts
-and data are specific to one browser profile and device.
+The default local login and camera attendance do not require Supabase. Staging Auth does not convert or migrate existing local accounts or records.
+Legacy accounts and records remain untouched; attendance and profiles in
+staging use the shared database, while tasks, goals, academic activities, and
+general notifications remain browser-local.
 
 ## Validation and deployment
 

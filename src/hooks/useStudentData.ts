@@ -104,6 +104,8 @@ export function useStudentProfile(email: string | undefined) {
   return {
     profile,
     isLoading: query.isLoading,
+    isError: query.isError,
+    error: query.error,
     isComplete: Boolean(
       profile?.fullName && profile?.studentId && profile?.institution && profile?.course,
     ),

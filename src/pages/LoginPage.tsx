@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom'
 import { BookOpenIcon, UsersIcon } from '@/components/icons'
 import { useAuthMutations } from '@/hooks/useStudentData'
 import { fetchStudentProfile } from '@/lib/dataApi'
+import { isSupabaseAuthEnabled } from '@/lib/supabase'
 import { cn } from '@/lib/utils'
 import type { UserRole } from '@/types'
 
@@ -28,7 +29,7 @@ export function LoginPage() {
   const [formError, setFormError] = useState('')
   const [successMessage, setSuccessMessage] = useState('')
 
-  const { register, login, logout } = useAuthMutations()
+  const { register, login, logout, resetPassword } = useAuthMutations()
   const navigate = useNavigate()
 
   const destination = (userRole: UserRole) =>
@@ -79,8 +80,9 @@ export function LoginPage() {
       return
     }
 
-    if (password.length < 6) {
-      setFormError('Password must contain at least 6 characters.')
+    const minimumPasswordLength = isSupabaseAuthEnabled ? 8 : 6
+    if (password.length < minimumPasswordLength) {
+      setFormError(`Password must contain at least ${minimumPasswordLength} characters.`)
       return
     }
     if (password !== confirmPassword) {
@@ -112,7 +114,11 @@ export function LoginPage() {
       setPassword('')
       setConfirmPassword('')
       setMode('login')
-      setSuccessMessage('Account created. Log in with your email and password to continue.')
+      setSuccessMessage(
+        isSupabaseAuthEnabled
+          ? 'Account created. Check your email and verify the address before signing in.'
+          : 'Account created. Log in with your email and password to continue.',
+      )
     } catch (error) {
       setFormError(
         error instanceof Error ? error.message : 'Unable to create account.',
@@ -120,15 +126,24 @@ export function LoginPage() {
     }
   }
 
-  const onForgotPassword = () => {
+  const onForgotPassword = async () => {
     setSuccessMessage('')
-    setFormError('Password reset is not configured. Contact your AttendPro administrator.')
+    setFormError('')
+    try {
+      await resetPassword.mutateAsync(email.trim())
+      setSuccessMessage(
+        'If an account exists for this address, password recovery instructions will be sent to its email.',
+      )
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : 'Could not request password recovery.')
+    }
   }
 
   const busy =
     login.isPending ||
     register.isPending ||
-    logout.isPending
+    logout.isPending ||
+    resetPassword.isPending
 
   return (
     <div className="flex min-h-dvh flex-col bg-slate-100">
@@ -279,6 +294,10 @@ export function LoginPage() {
                   : `Log in as ${role}`}
               </button>
             </form>
+          ) : isSupabaseAuthEnabled && role === 'staff' ? (
+            <p role="status" className="mt-5 rounded-xl bg-indigo-50 px-3 py-3 text-sm text-indigo-800">
+              Staff accounts are created by an AttendPro administrator. Use the invitation sent to your verified email address.
+            </p>
           ) : (
             <form onSubmit={onRegister} className="mt-5 space-y-4">
               <div>
@@ -323,10 +342,10 @@ export function LoginPage() {
                   type="password"
                   autoComplete="new-password"
                   required
-                  minLength={6}
+                  minLength={isSupabaseAuthEnabled ? 8 : 6}
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
-                  placeholder="Minimum 6 characters"
+                  placeholder={`Minimum ${isSupabaseAuthEnabled ? 8 : 6} characters`}
                   className={inputClass}
                 />
               </div>

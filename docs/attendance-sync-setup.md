@@ -1,9 +1,14 @@
 # Shared attendance across devices
 
 > This guide describes the separate legacy Supabase-backed live attendance
-> implementation. The staff camera/QR workflow uses local AttendPro dataApi and
+> implementation. The staff camera workflow uses local AttendPro dataApi and
 > browser storage instead; it does not depend on these setup steps. See
 > [camera attendance and student verification](./camera-attendance.md).
+>
+> The default application still uses browser-local student/staff accounts.
+> Supabase Auth is available only through the separate staging-mode setup in
+> [Supabase Auth staging setup](./supabase-staging-auth-setup.md); this legacy
+> attendance guide does not configure or migrate accounts.
 
 AttendPro's original attendance data lived only in `localStorage`, which is why
 a staff phone could never see a check-in made on a student phone, and why every
@@ -92,18 +97,17 @@ the hardening migrations; it is not an upgrade or rollback script.
    [`20261106213000_secure_attendance_and_notifications.sql`](../supabase/migrations/20261106213000_secure_attendance_and_notifications.sql),
    then
    [`20261106213400_attendance_integrity_and_identity.sql`](../supabase/migrations/20261106213400_attendance_integrity_and_identity.sql).
+   Staging Auth additionally requires
+   [`20261110170000_staging_auth_student_verification_and_staff_invites.sql`](../supabase/migrations/20261110170000_staging_auth_student_verification_and_staff_invites.sql)
+   and
+   [`20261110171000_fix_confirm_camera_attendance_student_email.sql`](../supabase/migrations/20261110171000_fix_confirm_camera_attendance_student_email.sql).
    Do not run these in production without explicit approval.
 4. Confirm the attendance, `user_profiles`, and `attendance_notifications`
-   tables exist. In **Authentication → Providers**, enable email/password and
-   require email confirmation. Configure the Site URL and redirect allowlist
-   using [the Auth setup guide](./supabase-auth-setup.md).
-5. Bootstrap the platform owner and verify staff assignments as described in
-   the Auth guide. Resolve identity/duplicate review rows before enabling
-   affected users.
-6. Add the build-time variables below. Keep
-   `VITE_SUPABASE_AUTH_ENABLED=false` until every migration, platform
-   administrator, reviewed staff assignment, email verification, and redirect
-   setting has been configured and tested in a non-production project.
+   tables exist. Staging Auth also requires its separate migration and
+   dashboard setup; these attendance instructions do not enable Auth.
+5. Resolve identity and duplicate review rows before using the separate
+   legacy backend. Do not treat the default browser-local login as verified
+   Supabase Auth or use this guide as authorization to change production.
 
 The security migrations grant only authenticated, role-checked RPCs. They
 install an opaque Realtime refresh signal (no student names/emails are
@@ -116,7 +120,6 @@ Create `.env.local` in the project root (it is already git-ignored):
 ```bash
 VITE_SUPABASE_URL=https://YOUR-PROJECT.supabase.co
 VITE_SUPABASE_ANON_KEY=YOUR-ANON-PUBLIC-KEY
-VITE_SUPABASE_AUTH_ENABLED=false
 ```
 
 Or copy `.env.example` and fill it in. The anon key is public; never use a
@@ -137,11 +140,10 @@ already `/AttendPro/`, matching `https://divyask739-aids.github.io/AttendPro/`.
 The repository currently has no GitHub Actions deployment workflow; the npm
 script is a local deployment path and must not be run without approval.
 
-The Supabase URL and public anon key must exist at build time. Keep
-`VITE_SUPABASE_AUTH_ENABLED=false` in local/deployment environments until the
-disposable-project tests and external settings below are approved. GitHub Pages
-is static hosting and cannot protect build-time variables; never place a
-service-role key in the bundle.
+The Supabase URL and public anon key are only for the separate legacy shared
+attendance backend. They are not required for local accounts or camera
+attendance. GitHub Pages is static hosting and cannot protect build-time
+variables; never place a service-role key in the bundle.
 
 For CI deployments, add the same two values as **GitHub repository secrets**
 and expose them to the build step:
@@ -150,7 +152,6 @@ and expose them to the build step:
 env:
   VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
   VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-  VITE_SUPABASE_AUTH_ENABLED: ${{ vars.VITE_SUPABASE_AUTH_ENABLED }}
 ```
 
 GitHub Pages cannot run backend code; Supabase hosts the database and the
@@ -236,13 +237,12 @@ disposable project before considering production approval.
 - Realtime broadcasts contain only a session identifier for cache invalidation,
   not names, emails, or roll numbers.
 
-**Authorization requirement:** Applying `supabase/schema.sql` alone does not
-provide trusted per-user authorization. Before enabling the Auth frontend, apply
-all ordered migrations in `supabase/migrations/`. They derive identity and role
-from verified Auth sessions, provision staff subjects through platform
-administrators, and separate personal from staff-confirmed attendance. Do not
-treat frontend role guards as database authorization, and do not rerun the
-bootstrap schema after the migrations without reapplying the migrations.
+**Legacy authorization requirement:** Applying `supabase/schema.sql` alone does
+not provide trusted per-user authorization. The ordered migrations in
+`supabase/migrations/` provide the shared attendance security foundation and
+the staging Auth integration. They are not required for the default
+browser-local account system and must not be applied to production without
+explicit approval.
 
 ## Troubleshooting
 
@@ -276,5 +276,6 @@ bootstrap schema after the migrations without reapplying the migrations.
 - Session codes are shareable bearer codes, not identity proof. Staff must
   verify students manually. Face detection is not face recognition.
 - SQL execution and authenticated browser/device tests remain outstanding.
-  Keep Auth disabled and do not deploy this checkout as a completed migration
-  until the migration chain is validated in a disposable Supabase project.
+  Keep staging Auth disabled until the separate project, migrations, and email
+  settings are verified. Do not deploy this checkout as a completed production
+  migration.

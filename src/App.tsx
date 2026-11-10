@@ -1,14 +1,18 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
 import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom'
+import { useEffect } from 'react'
 
 import { AppLayout } from '@/components/layout/AppLayout'
 import { RequireAuth, RequireRole } from '@/components/RouteGuards'
 import { useSession } from '@/hooks/useStudentData'
+import { isSupabaseAuthEnabled, supabase } from '@/lib/supabase'
+import { AuthCallbackPage } from '@/pages/AuthCallbackPage'
 import { AttendancePage } from '@/pages/AttendancePage'
 import { DashboardPage } from '@/pages/DashboardPage'
 import { GoalsPage } from '@/pages/GoalsPage'
 import { LoginPage } from '@/pages/LoginPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
+import { PasswordRecoveryPage } from '@/pages/PasswordRecoveryPage'
 import { PlannerPage } from '@/pages/PlannerPage'
 import { ProfilePage } from '@/pages/ProfilePage'
 import { RoleHome } from '@/pages/RoleHome'
@@ -21,12 +25,35 @@ import {
   StaffStudentsPage,
   StaffSubjectsPage,
 } from '@/pages/staff/StaffPages'
+import { StaffAccessPage } from '@/pages/staff/StaffAccessPage'
 
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: { staleTime: 60_000, retry: 1 },
   },
 })
+
+function AuthSessionSync() {
+  const client = useQueryClient()
+
+  useEffect(() => {
+    if (!isSupabaseAuthEnabled || !supabase) return
+
+    let previousUserId: string | null = null
+    const { data } = supabase.auth.onAuthStateChange((event, session) => {
+      const currentUserId = session?.user.id ?? null
+      if (event === 'SIGNED_IN' || (previousUserId && currentUserId !== previousUserId)) {
+        client.clear()
+      }
+      previousUserId = currentUserId
+      void client.invalidateQueries({ queryKey: ['session'] })
+    })
+
+    return () => data.subscription.unsubscribe()
+  }, [client])
+
+  return null
+}
 
 /** Passes the signed-in email down so every page reads the right account. */
 function Scoped({ children }: { children: (email: string) => React.ReactNode }) {
@@ -49,9 +76,12 @@ function ProfileRoute() {
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
+      <AuthSessionSync />
       <BrowserRouter basename="/AttendPro">
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/auth/callback" element={<AuthCallbackPage />} />
+          <Route path="/auth/reset-password" element={<PasswordRecoveryPage />} />
 
           <Route element={<RequireAuth />}>
             {/* ---------------- student portal ---------------- */}
@@ -124,6 +154,7 @@ export default function App() {
                   <Scoped>{(email) => <StaffActivitiesPage email={email} />}</Scoped>
                 }
               />
+              <Route path="staff/access" element={<StaffAccessPage />} />
             </Route>
 
             {/* ------------------ shared ------------------ */}

@@ -63,7 +63,7 @@ function StudentProfileForm({ email }: { email: string }) {
         <Field id="sp-email" label="Email" hint="Your account email">
           <input id="sp-email" value={form.email} disabled className={cn(inputClass, 'bg-slate-50')} />
         </Field>
-        <Field id="sp-id" label="Student ID" hint="Generated for your account and used by the staff QR scanner">
+        <Field id="sp-id" label="Student ID" hint="Generated for your account and shown to staff during attendance review">
           <input
             id="sp-id"
             value={form.studentId}
@@ -212,7 +212,7 @@ function StaffProfileForm({ email }: { email: string }) {
         <h3 className="text-sm font-semibold text-slate-900">Subject assignments</h3>
         <p className="mt-0.5 text-xs text-slate-500">
           {canEditAssignments
-            ? 'Use the same subject name and code as student accounts to build the local roster.'
+            ? 'Students are matched by normalized subject code. If a code is unavailable, matching falls back to the subject name.'
             : 'These platform-approved assignments determine which student attendance records you can access. Contact an AttendPro platform administrator to request a change.'}
         </p>
 
